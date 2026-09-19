@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import pytest
@@ -16,9 +17,19 @@ class RecordingService:
         self.calls: list[tuple] = []
         self.raises: Exception | None = None
         self.manifest: dict | None = None
+        # Deterministic gate for tests that need to observe a job mid-flight
+        # (e.g. polling while status is "running") without sleeping. Set
+        # `hold = True` before uploading; `run()` will then block after
+        # `entered` fires until the test calls `release()`.
+        self.hold = False
+        self.entered = threading.Event()
+        self._release = threading.Event()
 
     def run(self, job_id, input_path, options):
         self.calls.append((job_id, input_path, options))
+        self.entered.set()
+        if self.hold:
+            self._release.wait()
         if self.raises is not None:
             raise self.raises
         return self.manifest if self.manifest is not None else {
@@ -29,6 +40,10 @@ class RecordingService:
             "tables": [],
             "images": [],
         }
+
+    def release(self) -> None:
+        """Let a held `run()` call proceed to completion."""
+        self._release.set()
 
 
 @pytest.fixture

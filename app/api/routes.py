@@ -1,8 +1,10 @@
 import logging
 import shutil
+from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_paths, get_pool, get_settings_from_request, get_store, require_api_key
 from app.api.errors import ApiError
@@ -13,11 +15,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["documents"], dependencies=[Depends(require_api_key)])
 
-RETRY_AFTER_SECONDS = "30"
-
 
 def _job_base_url(job_id: str) -> str:
     return f"/v1/documents/{job_id}"
+
+
+def _write_upload(source, target: Path) -> None:
+    """Stream an uploaded file to disk. Called via run_in_threadpool so the
+    synchronous read/write never blocks the event loop."""
+    with target.open("wb") as destination:
+        shutil.copyfileobj(source, destination)
 
 
 @router.post(
@@ -40,11 +47,19 @@ async def create_document(
 
     job_id = str(uuid4())
     paths.create(job_id)
-    target = paths.input_file(job_id, file.filename or "upload")
-    with target.open("wb") as destination:
-        shutil.copyfileobj(file.file, destination)
-
-    job = store.create(job_id, target.name, parsed.model_dump(mode="json"))
+    try:
+        target = paths.input_file(job_id, file.filename or "upload")
+        await run_in_threadpool(_write_upload, file.file, target)
+        job = store.create(job_id, target.name, parsed.model_dump(mode="json"))
+    except Exception:
+        # A failure anywhere between directory creation and a durable store
+        # row (disk full, permission error, client disconnect mid-upload)
+        # must not leave an orphaned, unreferenced directory behind. Clean
+        # up and let the original exception propagate -- the generic
+        # exception handler renders it as a 500 the same way any other
+        # unexpected failure in this app is rendered.
+        paths.remove(job_id)
+        raise
 
     try:
         pool.enqueue(job_id)

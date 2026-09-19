@@ -1,5 +1,7 @@
 import json
 
+from fastapi.testclient import TestClient
+
 from app.conversion.service import ConversionFailed
 
 
@@ -112,8 +114,18 @@ def test_unknown_job_is_404(client, auth):
     assert response.json()["error"]["code"] == "not_found"
 
 
-def test_queue_full_returns_503(client, auth, recording_service, monkeypatch):
+def test_queue_full_returns_503(client, auth, recording_service, settings, monkeypatch):
+    from uuid import UUID
+
+    import app.api.routes as routes
     from app.jobs.pool import QueueFull
+    from app.storage.paths import JobPaths
+
+    # A fixed, known id (rather than the real server-generated uuid4()) so
+    # the test can assert on the exact row/directory that must NOT survive
+    # a 503 -- QueueFull must leave no orphan behind.
+    fixed_id = UUID("11111111-1111-1111-1111-111111111111")
+    monkeypatch.setattr(routes, "uuid4", lambda: fixed_id)
 
     def always_full(_job_id: str) -> None:
         raise QueueFull(_job_id)
@@ -124,3 +136,44 @@ def test_queue_full_returns_503(client, auth, recording_service, monkeypatch):
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "queue_full"
     assert response.headers["Retry-After"] == "30"
+
+    assert client.app.state.store.get(str(fixed_id)) is None
+    assert not JobPaths(settings.data_dir).job_dir(str(fixed_id)).exists()
+
+
+def test_upload_cleans_up_the_job_directory_on_a_mid_write_failure(
+    client, auth, settings, monkeypatch
+):
+    import app.api.routes as routes
+    from app.storage.paths import JobPaths
+
+    def boom(source, target):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(routes, "_write_upload", boom)
+
+    # The generic Exception handler renders a proper 500 response, but
+    # Starlette's ServerErrorMiddleware always re-raises the original
+    # exception afterwards too (by design, so servers can log it) --
+    # TestClient's default raise_server_exceptions=True surfaces that as a
+    # Python exception instead of a response. Use a lenient client against
+    # the same already-running app to inspect the actual HTTP response.
+    lenient_client = TestClient(client.app, raise_server_exceptions=False)
+    response = _upload(lenient_client, auth)
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "internal_error"
+
+    assert list(JobPaths(settings.data_dir).jobs_root.iterdir()) == []
+
+
+def test_mid_flight_job_is_pollable_with_a_null_result(client, auth, recording_service):
+    recording_service.hold = True
+    job_id = _upload(client, auth).json()["id"]
+    assert recording_service.entered.wait(timeout=5)
+
+    payload = client.get(f"/v1/documents/{job_id}", headers=auth).json()
+    assert payload["status"] == "running"
+    assert payload["result"] is None
+
+    recording_service.release()
+    assert client.app.state.pool.wait_idle(timeout=5)

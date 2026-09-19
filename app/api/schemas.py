@@ -5,6 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from app.api.errors import ApiError
 from app.config import Settings
+from app.jobs.models import Job, JobStatus
 
 MIN_IMAGE_SCALE = 1.0
 MAX_IMAGE_SCALE = 4.0
@@ -85,9 +86,6 @@ def _first_error(exc: ValidationError) -> str:
     location = ".".join(str(part) for part in first.get("loc", ()))
     message = first.get("msg", "invalid value")
     return f"options.{location}: {message}" if location else f"options: {message}"
-
-
-from app.jobs.models import Job, JobStatus
 
 
 class JobLinks(BaseModel):
