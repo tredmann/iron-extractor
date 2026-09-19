@@ -114,3 +114,39 @@ def test_document_without_pictures_still_succeeds(paths):
     assert manifest["images"] == []
     assert manifest["tables"] == []
     assert manifest["page_count"] == 0
+
+
+def test_table_without_provenance_has_null_page(paths):
+    doc = DoclingDocument(name="no-prov-table")
+    cells = [
+        TableCell(text="only", start_row_offset_idx=0, end_row_offset_idx=1,
+                  start_col_offset_idx=0, end_col_offset_idx=1, column_header=True),
+    ]
+    doc.add_table(data=TableData(num_rows=1, num_cols=1, table_cells=cells))
+
+    manifest = write_artifacts(doc, paths, "job-1")
+
+    assert len(manifest["tables"]) == 1
+    assert manifest["tables"][0] == {
+        "index": 0, "rows": 1, "cols": 1, "page": None,
+        "csv": "table-000.csv", "html": "table-000.html",
+    }
+
+
+def test_image_less_picture_is_skipped_without_disturbing_later_index(paths):
+    doc = DoclingDocument(name="mixed-pictures")
+    doc.add_picture(prov=_prov(1))  # no image attached: excluded from the manifest
+    doc.add_picture(
+        image=ImageRef.from_pil(Image.new("RGB", (8, 8), "blue"), dpi=72),
+        prov=_prov(1),
+    )
+
+    manifest = write_artifacts(doc, paths, "job-1")
+
+    assert len(manifest["images"]) == 1
+    entry = manifest["images"][0]
+    assert entry["name"] == "picture-001.png"
+    assert entry["kind"] == "picture"
+    assert entry["page"] == 1
+    assert entry["bytes"] > 0
+    assert paths.image_file("job-1", "picture-001.png").exists()
