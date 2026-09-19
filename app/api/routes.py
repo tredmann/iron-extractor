@@ -10,13 +10,25 @@ from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_paths, get_pool, get_settings_from_request, get_store, require_api_key
 from app.api.errors import ApiError
-from app.api.schemas import JobCreated, JobDetail, JobLinks, build_job_detail, parse_options
+from app.api.schemas import ErrorEnvelope, JobCreated, JobDetail, JobLinks, build_job_detail, parse_options
 from app.jobs.models import Job, JobStatus
 from app.jobs.pool import QueueFull
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["documents"], dependencies=[Depends(require_api_key)])
+
+_UNAUTHORIZED = {401: {"model": ErrorEnvelope, "description": "Missing or invalid API key."}}
+_NOT_FOUND = {404: {"model": ErrorEnvelope, "description": "No job with this id."}}
+_INVALID = {400: {"model": ErrorEnvelope, "description": "The request was not valid."}}
+_CONFLICT = {
+    409: {"model": ErrorEnvelope, "description": "The job has not produced artifacts."}
+}
+_QUEUE_FULL = {
+    503: {"model": ErrorEnvelope, "description": "The conversion queue is at capacity."}
+}
+
+OPTIONS_EXAMPLE = '{"ocr": true, "ocr_languages": ["en", "de"], "table_mode": "accurate", "image_scale": 2.0}'
 
 
 def _job_base_url(job_id: str) -> str:
@@ -35,11 +47,19 @@ def _write_upload(source, target: Path) -> None:
     status_code=status.HTTP_202_ACCEPTED,
     response_model=JobCreated,
     summary="Upload a document for conversion",
+    responses={**_INVALID, **_UNAUTHORIZED, **_QUEUE_FULL},
 )
 async def create_document(
     request: Request,
     file: UploadFile = File(..., description="The document to convert."),
-    options: str | None = Form(default=None, description="Conversion options as a JSON object."),
+    options: str | None = Form(
+        default=None,
+        description=(
+            "Conversion options as a JSON object. Omit for server defaults. "
+            "Unknown fields are rejected."
+        ),
+        json_schema_extra={"example": OPTIONS_EXAMPLE},
+    ),
 ) -> JobCreated:
     settings = get_settings_from_request(request)
     paths = get_paths(request)
@@ -86,6 +106,7 @@ async def create_document(
     "/documents/{job_id}",
     response_model=JobDetail,
     summary="Fetch job status and, once finished, every artifact link",
+    responses={**_UNAUTHORIZED, **_NOT_FOUND},
 )
 async def get_document(request: Request, job_id: str) -> JobDetail:
     job = get_store(request).get(job_id)
@@ -118,6 +139,7 @@ def _serve(path, media_type: str, filename: str) -> FileResponse:
     "/documents/{job_id}/markdown",
     response_class=FileResponse,
     summary="Fetch the converted document as Markdown",
+    responses={**_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
 )
 async def get_markdown(request: Request, job_id: str) -> FileResponse:
     _require_succeeded(request, job_id)
@@ -130,6 +152,7 @@ async def get_markdown(request: Request, job_id: str) -> FileResponse:
     "/documents/{job_id}/document.json",
     response_class=FileResponse,
     summary="Fetch the full DoclingDocument JSON",
+    responses={**_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
 )
 async def get_document_json(request: Request, job_id: str) -> FileResponse:
     _require_succeeded(request, job_id)
@@ -142,6 +165,7 @@ async def get_document_json(request: Request, job_id: str) -> FileResponse:
     "/documents/{job_id}/tables/{index}",
     response_class=FileResponse,
     summary="Fetch one extracted table as CSV or HTML",
+    responses={**_INVALID, **_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
 )
 async def get_table(
     request: Request,
@@ -163,6 +187,7 @@ async def get_table(
     "/documents/{job_id}/images/{name}",
     response_class=FileResponse,
     summary="Fetch one extracted image",
+    responses={**_INVALID, **_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
 )
 async def get_image(request: Request, job_id: str, name: str) -> FileResponse:
     job = _require_succeeded(request, job_id)
@@ -185,6 +210,7 @@ async def get_image(request: Request, job_id: str, name: str) -> FileResponse:
     "/documents/{job_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete a job and every artifact it produced",
+    responses={**_UNAUTHORIZED, **_NOT_FOUND},
 )
 async def delete_document(request: Request, job_id: str) -> Response:
     if not get_store(request).delete(job_id):

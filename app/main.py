@@ -14,6 +14,21 @@ from app.storage.paths import JobPaths
 
 logger = logging.getLogger(__name__)
 
+API_DESCRIPTION = """
+Convert documents with [docling](https://github.com/docling-project/docling).
+
+Conversion is asynchronous:
+
+1. `POST /v1/documents` with your file. The response is **202** with a job `id`.
+2. Poll `GET /v1/documents/{id}` until `status` is `succeeded` or `failed`.
+3. On success, `result` links every artifact: Markdown, the full DoclingDocument
+   JSON, each table as CSV or HTML, and each extracted image.
+4. `DELETE /v1/documents/{id}` removes the job and its files.
+
+Every route except `/health` requires an `X-API-Key` header. Artifact routes answer
+**409** while a job is still running, so "not ready" is distinguishable from "not found".
+"""
+
 health_router = APIRouter()
 
 
@@ -111,6 +126,7 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
     app = FastAPI(
         title="Docling Extraction API",
         version="0.1.0",
+        description=API_DESCRIPTION,
         lifespan=lifespan,
         docs_url="/docs" if settings.docs_enabled else None,
         redoc_url="/redoc" if settings.docs_enabled else None,
