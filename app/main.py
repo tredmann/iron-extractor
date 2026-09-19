@@ -40,7 +40,7 @@ async def health(request: Request) -> dict:
     pool = request.app.state.pool
     return {
         "status": "ok",
-        "models_loaded": request.app.state.models_loaded,
+        "models_loaded": request.app.state.models_loaded(),
         "workers": pool.worker_count,
         "queue_depth": pool.queue_depth,
     }
@@ -57,16 +57,23 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
     paths = JobPaths(settings.data_dir)
     store = JobStore(settings.db_path, paths)
 
-    models_loaded = service is None
     if service is None:
-        service = ConversionService(
-            paths,
-            ConverterProvider(
-                models_dir=settings.models_dir,
-                timeout_seconds=settings.job_timeout_seconds,
-                cache_size=settings.converter_cache_size,
-            ),
+        provider = ConverterProvider(
+            models_dir=settings.models_dir,
+            timeout_seconds=settings.job_timeout_seconds,
+            cache_size=settings.converter_cache_size,
         )
+        service = ConversionService(paths, provider)
+        # Asked at request time, not fixed at construction time. As a
+        # constant it reported `true` before a single weight had been read,
+        # so the container healthcheck went green even when the model
+        # directory was unreadable -- and the field is spec-documented, so
+        # it keeps its name.
+        models_loaded = provider.models_loaded
+    else:
+        # A substituted service has no converter provider and loads nothing.
+        def models_loaded() -> bool:
+            return False
 
     pool = WorkerPool(
         store=store,

@@ -1,20 +1,29 @@
 import json
-from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.api.errors import ApiError
-from app.config import Settings
+# TableMode is defined in app.config (the only module both Settings and
+# this one can depend on) and re-exported here, so the API layer stays the
+# place the rest of the app imports it from.
+from app.config import Settings, TableMode
 from app.jobs.models import Job, JobStatus
 
 MIN_IMAGE_SCALE = 1.0
 MAX_IMAGE_SCALE = 4.0
 IMAGE_SCALE_STEP = 0.5
 
-
-class TableMode(str, Enum):
-    FAST = "fast"
-    ACCURATE = "accurate"
+__all__ = [
+    "ConversionOptions",
+    "ErrorEnvelope",
+    "JobCreated",
+    "JobDetail",
+    "JobLinks",
+    "JobResult",
+    "TableMode",
+    "build_job_detail",
+    "parse_options",
+]
 
 
 class ConversionOptions(BaseModel):
@@ -34,7 +43,10 @@ class ConversionOptions(BaseModel):
         default=2.0,
         description=(
             "Rendering scale for extracted images (1.0 ~ 72 DPI). "
-            "Clamped to 1.0-4.0 and rounded to the nearest 0.5."
+            "Clamped to 1.0-4.0, then snapped to a multiple of 0.5. An "
+            "exact midpoint snaps to the nearest *even* multiple, because "
+            "Python rounds halves to even: 1.25 becomes 1.0 and 1.75 "
+            "becomes 2.0, not 1.5 for both."
         ),
     )
 

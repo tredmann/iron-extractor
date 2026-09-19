@@ -82,3 +82,15 @@ def test_cache_key_distinguishes_option_sets():
     other = ConversionOptions(ocr=True, ocr_languages=["de"], table_mode=TableMode.FAST, image_scale=2.0)
     assert first.cache_key() == same.cache_key()
     assert first.cache_key() != other.cache_key()
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [(1.25, 1.0), (1.75, 2.0), (2.25, 2.0), (2.75, 3.0), (3.25, 3.0), (3.75, 4.0)],
+)
+def test_image_scale_midpoints_round_half_to_even(settings: Settings, given, expected):
+    """Pins the behaviour the field description now documents: an exact
+    midpoint snaps to the nearest *even* multiple of 0.5, because Python
+    rounds halves to even. Not changed -- the quantization is what bounds
+    the converter cache key space."""
+    assert parse_options(json.dumps({"image_scale": given}), settings).image_scale == expected

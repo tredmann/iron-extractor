@@ -91,3 +91,44 @@ def test_cache_is_per_thread(provider, monkeypatch):
     thread.join()
 
     assert counts == [0]
+
+
+def test_models_loaded_is_false_until_a_converter_is_built(provider, monkeypatch):
+    monkeypatch.setattr(
+        ConverterProvider, "_build_converter", lambda self, options: object()
+    )
+    assert provider.models_loaded() is False
+    provider.get(ConversionOptions())
+    assert provider.models_loaded() is True
+
+
+def test_models_loaded_is_process_wide_not_per_thread(provider, monkeypatch):
+    """The question /health answers is whether weights are readable at all,
+    not whether the thread serving this request holds a cached converter."""
+    monkeypatch.setattr(
+        ConverterProvider, "_build_converter", lambda self, options: object()
+    )
+    provider.get(ConversionOptions())
+
+    seen: list[bool] = []
+    thread = threading.Thread(target=lambda: seen.append(provider.models_loaded()))
+    thread.start()
+    thread.join()
+
+    assert seen == [True]
+
+
+def test_a_failed_build_leaves_models_unloaded(provider, monkeypatch):
+    def boom(self, options):
+        raise RuntimeError("/opt/models is unreadable")
+
+    monkeypatch.setattr(ConverterProvider, "_build_converter", boom)
+
+    with pytest.raises(RuntimeError):
+        provider.get(ConversionOptions())
+    assert provider.models_loaded() is False
+
+
+def test_non_positive_cache_size_is_rejected():
+    with pytest.raises(ValueError):
+        ConverterProvider(models_dir=None, timeout_seconds=None, cache_size=0)

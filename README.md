@@ -48,6 +48,7 @@ job does not exist — so "not ready" is always distinguishable from "not found"
 | `JOB_TIMEOUT_SECONDS` | `600` | Per-document docling timeout |
 | `CONVERTER_CACHE_SIZE` | `4` | Cached converters per worker thread |
 | `SHUTDOWN_GRACE_SECONDS` | `30` | Seconds to let in-flight jobs finish on shutdown before the pool is forced to stop |
+| `MAX_UPLOAD_BYTES` | `209715200` (200 MiB) | Requests declaring a larger `Content-Length` are refused with **413** before the body is read |
 | `DEFAULT_OCR` | `true` | Default when the request omits it |
 | `DEFAULT_OCR_LANGUAGES` | `en` | Default when the request omits it |
 | `DEFAULT_TABLE_MODE` | `accurate` | Default when the request omits it |
@@ -61,8 +62,22 @@ job does not exist — so "not ready" is always distinguishable from "not found"
   Scale with `WORKER_THREADS`, not `--workers`.
 - **Nothing is cleaned up automatically.** Deleting jobs is manual, via
   `DELETE /v1/documents/{id}`. Watch the volume.
-- **There is no upload size limit.** A very large document can occupy a worker
-  for a long time.
+- **Uploads are capped by `MAX_UPLOAD_BYTES`** (200 MiB by default). The check
+  runs in ASGI middleware, ahead of routing, because FastAPI reads the request
+  body before it resolves dependencies — so without it an unauthenticated
+  client could spool an unbounded upload to disk against a route that answers
+  401. A request that declares no `Content-Length` (chunked transfer) is passed
+  through; bound those at your proxy. Within the limit, a very large document
+  can still occupy a worker for a long time.
+- **Nothing enumerates the volume.** There is no list route and no TTL sweeper,
+  so the only way to see what is on disk is filesystem access — `ls $DATA_DIR/jobs`
+  or a query against `$DATA_DIR/jobs.sqlite3`. Reclaiming space for jobs whose
+  ids you have lost means deleting directories directly, not calling the API.
+- **Logs are plain text, not structured.** One line per event via the stdlib
+  `logging` module (`%(asctime)s %(levelname)s %(name)s %(message)s`). There are
+  no key-value or JSON fields to index, so a log pipeline will need to parse
+  them, and job ids are embedded in message text rather than carried as
+  attributes.
 - **Restart behavior:** jobs that were running are marked `failed` with type
   `interrupted`; jobs still queued are re-queued and run.
 - **The shipped image only bakes in English OCR weights.** The Dockerfile
@@ -89,6 +104,18 @@ never carries either):
 ```bash
 docker compose run --rm -e API_KEYS=test test pytest -m "" tests/test_end_to_end.py -v
 ```
+
+**Building without compose:** the `test` stage is last in the Dockerfile, so a
+bare `docker build .` builds *that* — the image with `tests/` and pytest in it,
+not the deployable one. Pass the stage explicitly:
+
+```bash
+docker build --target runtime -t docling-api .   # the deployable image
+docker build --target test    -t docling-api-test .
+```
+
+`docker compose` already names the stage for each service (`target: runtime`
+for `api`, `target: test` for `test`), so this only applies to direct builds.
 
 ## Design
 

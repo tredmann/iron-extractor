@@ -23,10 +23,18 @@ class ConverterProvider:
         timeout_seconds: float | None,
         cache_size: int = 4,
     ) -> None:
+        if cache_size < 1:
+            raise ValueError(f"cache_size must be at least 1, got {cache_size}")
         self._models_dir = models_dir
         self._timeout_seconds = timeout_seconds
-        self._cache_size = max(1, cache_size)
+        self._cache_size = cache_size
         self._local = threading.local()
+        # Flipped the first time a converter is actually built, which is
+        # the first time docling reads any weight off disk. /health reports
+        # this rather than a constant, so the container healthcheck cannot
+        # go green while /opt/models is unreadable. An Event because worker
+        # threads set it and the event loop reads it.
+        self._ready = threading.Event()
 
     def build_pipeline_options(self, options: ConversionOptions):
         from docling.datamodel.pipeline_options import (
@@ -68,11 +76,21 @@ class ConverterProvider:
             return cache[key]
 
         converter = self._build_converter(options)
+        self._ready.set()
         cache[key] = converter
         while len(cache) > self._cache_size:
             evicted, _ = cache.popitem(last=False)
             logger.info("Evicted cached converter for options %s", evicted)
         return converter
+
+    def models_loaded(self) -> bool:
+        """True once at least one converter has been built successfully.
+
+        Process-wide, not per-thread: the question /health answers is
+        whether the model weights are readable at all, not whether the
+        thread serving this request happens to hold a cached converter.
+        """
+        return self._ready.is_set()
 
     def cached_key_count(self) -> int:
         return len(self._cache())
