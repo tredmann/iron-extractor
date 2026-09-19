@@ -60,19 +60,48 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         settings.data_dir.mkdir(parents=True, exist_ok=True)
-        store.connect()
-        pool.start()
 
-        for job_id in store.recover_interrupted():
-            try:
-                pool.enqueue(job_id)
-                logger.info("Re-queued job %s after restart", job_id)
-            except QueueFull:
-                store.mark_failed(
-                    job_id,
-                    "interrupted",
-                    "The queue was full when the service restarted.",
-                )
+        # Tracked explicitly rather than inferred from where an exception
+        # landed: on a startup failure, cleanup below must tear down exactly
+        # what actually got initialized, no more and no less.
+        store_connected = False
+        pool_started = False
+        try:
+            store.connect()
+            store_connected = True
+            # Recovery runs after the pool has started rather than before it,
+            # even though the design's prose describes recover-then-start.
+            # This ordering is deliberate and safe: WorkerPool.enqueue() may
+            # be called whether or not workers are already draining the
+            # queue, so starting the pool first changes nothing observable.
+            # Do not reorder this without re-verifying that.
+            pool.start()
+            pool_started = True
+
+            for job_id in store.recover_interrupted():
+                try:
+                    pool.enqueue(job_id)
+                    logger.info("Re-queued job %s after restart", job_id)
+                except QueueFull:
+                    store.mark_failed(
+                        job_id,
+                        "interrupted",
+                        "The queue was full when the service restarted.",
+                    )
+        except Exception:
+            logger.exception("Startup failed; cleaning up before re-raising")
+            if pool_started:
+                try:
+                    pool.stop(grace_seconds=0)
+                except Exception:
+                    logger.exception("Error stopping pool during startup-failure cleanup")
+            if store_connected:
+                try:
+                    store.close()
+                except Exception:
+                    logger.exception("Error closing store during startup-failure cleanup")
+            raise
+
         yield
 
         pool.stop(grace_seconds=settings.shutdown_grace_seconds)

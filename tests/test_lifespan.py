@@ -1,3 +1,5 @@
+import pytest
+
 from app.config import Settings
 from app.jobs.models import JobStatus
 from app.jobs.store import JobStore
@@ -50,3 +52,32 @@ def test_startup_requeues_queued_jobs(settings: Settings, recording_service):
         assert test_client.app.state.pool.wait_idle(timeout=5)
 
     assert recording_service.calls[0][0] == "pending"
+
+
+def test_startup_failure_cleans_up_pool_and_store(settings: Settings, recording_service, monkeypatch):
+    """If startup fails partway through, already-started resources must be
+    torn down (worker threads stopped, store closed) before the exception
+    propagates -- otherwise a bad startup leaks an open sqlite connection
+    and live daemon threads.
+    """
+
+    def _boom(self):
+        raise RuntimeError("recover_interrupted exploded")
+
+    monkeypatch.setattr(JobStore, "recover_interrupted", _boom)
+
+    app = create_app(settings=settings, service=recording_service)
+
+    with pytest.raises(RuntimeError, match="recover_interrupted exploded"):
+        with TestClient(app):
+            pass
+
+    store = app.state.store
+    pool = app.state.pool
+
+    # The store must have been closed: its connection is gone, and any
+    # further use raises the same error connect() failing to happen would.
+    assert store._conn is None
+
+    # No worker thread should still be running.
+    assert pool.worker_count == 0
