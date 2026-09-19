@@ -1,0 +1,8 @@
+fastapi==0.120.4
+uvicorn[standard]==0.41.0
+pydantic==2.12.4
+pydantic-settings==2.13.0
+python-multipart==0.0.21
+docling-core==2.52.0
+pandas==2.3.3
+pillow==12.1.0
