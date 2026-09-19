@@ -28,3 +28,15 @@ def require_api_key(
     # compare_digest against every key so the check is constant-time per key.
     if not any(compare_digest(provided, key) for key in settings.api_key_list):
         raise ApiError(401, "unauthorized", "Invalid API key.")
+
+
+def get_store(request: Request):
+    return request.app.state.store
+
+
+def get_pool(request: Request):
+    return request.app.state.pool
+
+
+def get_paths(request: Request):
+    return request.app.state.paths
