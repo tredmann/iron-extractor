@@ -31,14 +31,27 @@ class WorkerPool:
         self._store = store
         self._service = service
         self._paths = paths
-        self._thread_count = max(1, threads)
+        # Validated, not coerced. `max(1, ...)` hid a misconfiguration:
+        # queue.Queue(maxsize=0) in particular means *unbounded*, which
+        # would silently turn the 503 backpressure into an OOM. Settings
+        # rejects these at startup; this is the same check one layer in,
+        # for the pool's direct callers.
+        if threads < 1:
+            raise ValueError(f"threads must be at least 1, got {threads}")
+        if queue_max < 1:
+            raise ValueError(f"queue_max must be at least 1, got {queue_max}")
+        self._thread_count = threads
         # queue.Queue, not asyncio.Queue: the consumers are OS threads.
-        self._queue: queue.Queue = queue.Queue(maxsize=max(1, queue_max))
+        self._queue: queue.Queue = queue.Queue(maxsize=queue_max)
         self._threads: list[threading.Thread] = []
         self._in_flight = 0
         self._in_flight_lock = threading.Lock()
         self._idle = threading.Event()
         self._idle.set()
+        # Set by stop() before anything else, so a worker that reaches the
+        # top of its loop after that point exits instead of starting
+        # another conversion. Never cleared: a stopped pool stays stopped.
+        self._stopping = threading.Event()
 
     def start(self) -> None:
         for index in range(self._thread_count):
@@ -50,9 +63,46 @@ class WorkerPool:
         logger.info("Started %d conversion worker(s)", self._thread_count)
 
     def stop(self, grace_seconds: float) -> None:
-        for _ in self._threads:
-            self._queue.put(_SHUTDOWN)
+        """Stop accepting new work; give in-flight conversions a grace period.
+
+        The ordering here is the whole fix, and each step is load-bearing.
+
+        `_stopping` is set first. The spec's contract is "stop accepting
+        new work, allow in-flight conversions a grace period to finish",
+        and appending sentinels to the tail did the opposite: a worker
+        kept taking queued jobs until it finally reached a sentinel, so
+        shutdown drained the entire backlog and started brand-new
+        conversions inside the grace window. With the flag set up front, a
+        worker finishes the job it is on and then exits.
+
+        The deadline is computed before the puts, not after, so
+        `grace_seconds` bounds the whole of stop() rather than only the
+        part following them.
+
+        The sentinels go in with `put_nowait`. A blocking `put` on a full
+        queue waits for a worker to take an item -- and workers take
+        queued jobs, not sentinels -- so at SIGTERM with a full queue and
+        a 600s document timeout this could block for many minutes, past
+        any grace period, on the event loop's thread. A sentinel that does
+        not fit is not needed anyway: a full queue means every worker has
+        an item waiting, and now *any* item makes a worker exit. Sentinels
+        only exist to wake a worker blocked on an empty queue.
+
+        Lock note: this method touches the queue's lock alone and never
+        `_in_flight_lock`, so it cannot invert the one-directional
+        `_in_flight_lock` -> queue-lock ordering the rest of the class
+        depends on.
+        """
+        self._stopping.set()
         deadline = time.monotonic() + grace_seconds
+        for _ in self._threads:
+            try:
+                self._queue.put_nowait(_SHUTDOWN)
+            except queue.Full:
+                # Retry on the next iteration in case a worker has since
+                # freed a slot; if none ever does, the queued items
+                # themselves are what wake the remaining workers.
+                logger.debug("Queue full while offering a shutdown sentinel")
         for thread in self._threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
         self._threads.clear()
@@ -99,7 +149,23 @@ class WorkerPool:
         while True:
             item = self._queue.get()
             if item is _SHUTDOWN:
-                self._queue.task_done()
+                return
+
+            if self._stopping.is_set():
+                # Shutdown began while this job sat in the queue, so it
+                # must not be started now -- the grace period belongs to
+                # work already running. The row stays `queued`, and
+                # recover_interrupted() re-enqueues it on the next start,
+                # which is exactly what happens to anything still in the
+                # queue at shutdown.
+                logger.info(
+                    "Shutting down; job %s stays queued for the next start", item
+                )
+                # Recompute rather than leave idle stale-cleared. Takes
+                # _in_flight_lock before reading the queue, the same
+                # direction as everywhere else in this class.
+                with self._in_flight_lock:
+                    self._update_idle_locked()
                 return
 
             self._enter_job()
@@ -109,7 +175,6 @@ class WorkerPool:
                 # Nothing may escape: a worker thread must outlive a bad job.
                 logger.exception("Worker loop error on job %s", item)
             finally:
-                self._queue.task_done()
                 self._leave_job()
 
     def _process(self, job_id: str) -> None:

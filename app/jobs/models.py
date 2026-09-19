@@ -8,10 +8,6 @@ class JobStatus(str, Enum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
 
-    @property
-    def is_terminal(self) -> bool:
-        return self in {JobStatus.SUCCEEDED, JobStatus.FAILED}
-
 
 @dataclass(frozen=True)
 class Job:

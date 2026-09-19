@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.openapi.utils import get_openapi
+from starlette.concurrency import run_in_threadpool
 
 from app.api.errors import install_error_handlers
 from app.api.routes import router as documents_router
@@ -121,7 +122,11 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
 
         yield
 
-        pool.stop(grace_seconds=settings.shutdown_grace_seconds)
+        # Off the event loop: stop() joins worker threads for up to
+        # shutdown_grace_seconds, and blocking the loop for that long
+        # stalls everything else the server still has to do to shut down
+        # cleanly.
+        await run_in_threadpool(pool.stop, settings.shutdown_grace_seconds)
         store.close()
 
     app = FastAPI(
