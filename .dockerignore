@@ -6,3 +6,5 @@ __pycache__/
 data/
 scratch/
 docs/
+.env
+.env*

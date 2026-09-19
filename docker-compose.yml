@@ -1,6 +1,8 @@
 services:
   api:
-    build: .
+    build:
+      context: .
+      target: runtime
     image: docling-extraction-api:latest
     ports:
       - "8000:8000"
@@ -15,6 +17,24 @@ services:
     volumes:
       - docling-data:/data
     restart: unless-stopped
+
+  # Test-only image: adds pytest/httpx and tests/ on top of the exact
+  # `runtime` image (see the Dockerfile's `test` stage). Never built by
+  # `docker compose up` / a plain `docker compose build` of `api` -- only
+  # by explicitly running this service, e.g.:
+  #   docker compose run --rm -e API_KEYS=test test pytest -v -m "" tests/test_converters.py tests/test_end_to_end.py
+  # Deliberately has no volume: tests/test_end_to_end.py uses pytest's own
+  # tmp_path, never the api service's /data, so there is nothing for it to
+  # share with -- and no risk of a test run touching production data.
+  test:
+    build:
+      context: .
+      target: test
+    image: docling-extraction-api:test
+    environment:
+      API_KEYS: ${API_KEYS:-test}
+    profiles:
+      - test
 
 volumes:
   docling-data:

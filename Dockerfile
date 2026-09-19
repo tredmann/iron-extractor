@@ -16,8 +16,11 @@ RUN apt-get update \
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# CPU-only torch wheels: several GB smaller than the CUDA default.
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+# CPU-only torch wheels: several GB smaller than the CUDA default. Pinned
+# exactly (like every other dependency in this project) so a rebuild next
+# month can't silently resolve a different torch build.
+RUN pip install --index-url https://download.pytorch.org/whl/cpu \
+    torch==2.14.0+cpu torchvision==0.29.0+cpu
 
 COPY requirements-base.txt requirements.txt ./
 RUN pip install -r requirements.txt
@@ -32,12 +35,6 @@ RUN pip install -r requirements.txt
 # Settings.default_ocr_languages; requesting other OCR languages against
 # this offline image requires rebuilding with more --easyocr-lang flags.
 RUN docling-tools models download -o /opt/models layout tableformer easyocr --easyocr-lang en
-
-# Pinned to match requirements-dev.txt. Not ruff -- that's a dev-only lint
-# tool, irrelevant at runtime -- but pytest+httpx are what let this image
-# run its own test suite (see Step 6/7 of this task) as the one place any
-# of it ever executes against the real docling package.
-RUN pip install pytest==9.1.0 httpx==0.28.1
 
 
 FROM python:3.12-slim AS runtime
@@ -64,8 +61,6 @@ RUN useradd --create-home --uid 10001 docling \
 
 WORKDIR /srv
 COPY --chown=docling:docling app ./app
-COPY --chown=docling:docling tests ./tests
-COPY --chown=docling:docling pytest.ini ./
 
 USER docling
 VOLUME ["/data"]
@@ -77,3 +72,29 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
 # One worker only: the queue and thread pool live in this process.
 CMD ["uvicorn", "app.main:create_app", "--factory", \
      "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+
+
+# Test-only stage: adds the test suite and test-only dependencies on top of
+# the exact runtime image, so `docker compose run --rm test pytest ...`
+# exercises the real thing without shipping pytest/httpx/tests/ in the
+# image that actually gets deployed. Never built by a plain `docker compose
+# up` / `build` of the default `api` service -- only by targeting this
+# stage explicitly (see the `test` service in docker-compose.yml).
+FROM runtime AS test
+
+USER root
+
+# Pinned to match requirements-dev.txt. Not ruff -- that's a dev-only lint
+# tool, irrelevant here too -- but pytest+httpx are what let this stage run
+# the project's test suite, including the one place any of it ever
+# executes against the real docling package.
+RUN pip install pytest==9.1.0 httpx==0.28.1
+
+COPY --chown=docling:docling tests ./tests
+COPY --chown=docling:docling pytest.ini ./
+
+# Owned by the same non-root user as everything else in /srv, so pytest's
+# own cache directory can be created without a permission error.
+RUN chown -R docling:docling /srv
+
+USER docling

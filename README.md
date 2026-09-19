@@ -81,10 +81,13 @@ job does not exist — so "not ready" is always distinguishable from "not found"
 .venv/bin/pytest                # fast suite; no models, no torch
 ```
 
-The slow end-to-end test needs real docling and weights — run it in the container:
+The slow end-to-end test needs real docling and weights — run it in the
+container, against the dedicated `test` image (a superset of the runtime
+image with `tests/` and `pytest`/`httpx` added; the deployed `api` image
+never carries either):
 
 ```bash
-docker compose run --rm -e API_KEYS=test api pytest -m "" tests/test_end_to_end.py -v
+docker compose run --rm -e API_KEYS=test test pytest -m "" tests/test_end_to_end.py -v
 ```
 
 ## Design
