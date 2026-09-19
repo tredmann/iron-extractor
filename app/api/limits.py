@@ -56,6 +56,16 @@ class ContentLengthLimitMiddleware:
 
 
 def _content_length(scope: Scope) -> int | None:
+    # This middleware is registered with app.add_middleware() before
+    # install_error_handlers() runs (see main.py), which puts it outside
+    # the exception-handling middleware FastAPI wraps around routing.
+    # Anything raised from here -- or from ContentLengthLimitMiddleware
+    # above -- would therefore render as a bare framework 500, not the
+    # project's {"error": {...}} envelope. That's moot today: the only
+    # thing that could raise, int(value) below, is guarded by the
+    # try/except right here. If this function ever grows a path that can
+    # raise, either guard it the same way or move the check inside the
+    # routing layer so it's covered by the installed handlers.
     for name, value in scope.get("headers", ()):
         if name == b"content-length":
             try:

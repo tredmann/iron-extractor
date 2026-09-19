@@ -1,5 +1,6 @@
 import logging
 from secrets import compare_digest
+from typing import NoReturn
 
 from fastapi import Request, Security
 from fastapi.security import APIKeyHeader
@@ -38,12 +39,19 @@ def require_api_key(
         _refuse(request, "an unrecognized key", "Invalid API key.")
 
 
-def _refuse(request: Request, reason: str, message: str) -> None:
+def _refuse(request: Request, reason: str, message: str) -> NoReturn:
     """Log the rejection, then raise it.
 
     Without this there was no way to notice a key that had been rotated
     out of a client's config, or anyone working through a key list. The
     key itself is never logged -- only why it was refused and who sent it.
+
+    Annotated `NoReturn`, not `None`: `require_api_key` calls this for the
+    missing-header case and then falls through to `compare_digest(provided,
+    key)` on the very next line, which is only type-safe because this
+    function never returns. `NoReturn` makes that narrowing explicit, so a
+    future edit that gives `_refuse` a conditional return path fails type
+    checking instead of turning into a 500 from `compare_digest(None, key)`.
     """
     client = request.client
     logger.warning(
