@@ -85,3 +85,129 @@ def _first_error(exc: ValidationError) -> str:
     location = ".".join(str(part) for part in first.get("loc", ()))
     message = first.get("msg", "invalid value")
     return f"options.{location}: {message}" if location else f"options: {message}"
+
+
+from app.jobs.models import Job, JobStatus
+
+
+class JobLinks(BaseModel):
+    self: str = Field(description="Canonical URL for polling this job.")
+
+
+class JobCreated(BaseModel):
+    id: str
+    status: JobStatus
+    filename: str
+    created_at: str
+    links: JobLinks
+
+
+class JobError(BaseModel):
+    type: str = Field(description="Machine-readable failure kind, e.g. 'timeout'.")
+    message: str
+
+
+class ArtifactRef(BaseModel):
+    url: str
+    bytes: int
+
+
+class TableRef(BaseModel):
+    index: int
+    rows: int
+    cols: int
+    page: int | None = None
+    csv_url: str
+    html_url: str
+
+
+class ImageRef(BaseModel):
+    name: str
+    kind: str
+    page: int | None = None
+    url: str
+    bytes: int
+
+
+class JobResult(BaseModel):
+    page_count: int
+    warnings: list[str] = []
+    markdown: ArtifactRef
+    document: ArtifactRef
+    tables: list[TableRef] = []
+    images: list[ImageRef] = []
+
+
+class JobDetail(BaseModel):
+    id: str
+    status: JobStatus
+    filename: str
+    created_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+    options: ConversionOptions
+    error: JobError | None = None
+    result: JobResult | None = None
+
+
+class ErrorBody(BaseModel):
+    code: str
+    message: str
+
+
+class ErrorEnvelope(BaseModel):
+    error: ErrorBody
+
+
+def build_job_detail(job: Job, base: str) -> JobDetail:
+    """Render a stored job as its API representation, expanding artifact URLs."""
+    return JobDetail(
+        id=job.id,
+        status=job.status,
+        filename=job.filename,
+        created_at=job.created_at,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        options=ConversionOptions(**job.options) if job.options else ConversionOptions(),
+        error=(
+            JobError(type=job.error_type, message=job.error_message or "")
+            if job.error_type
+            else None
+        ),
+        result=_build_result(job, base) if job.manifest else None,
+    )
+
+
+def _build_result(job: Job, base: str) -> JobResult:
+    manifest = job.manifest or {}
+    return JobResult(
+        page_count=manifest.get("page_count", 0),
+        warnings=manifest.get("warnings", []),
+        markdown=ArtifactRef(
+            url=f"{base}/markdown", bytes=manifest.get("markdown", {}).get("bytes", 0)
+        ),
+        document=ArtifactRef(
+            url=f"{base}/document.json", bytes=manifest.get("document", {}).get("bytes", 0)
+        ),
+        tables=[
+            TableRef(
+                index=entry["index"],
+                rows=entry["rows"],
+                cols=entry["cols"],
+                page=entry.get("page"),
+                csv_url=f"{base}/tables/{entry['index']}?format=csv",
+                html_url=f"{base}/tables/{entry['index']}?format=html",
+            )
+            for entry in manifest.get("tables", [])
+        ],
+        images=[
+            ImageRef(
+                name=entry["name"],
+                kind=entry["kind"],
+                page=entry.get("page"),
+                url=f"{base}/images/{entry['name']}",
+                bytes=entry["bytes"],
+            )
+            for entry in manifest.get("images", [])
+        ],
+    )

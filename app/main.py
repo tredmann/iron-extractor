@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, FastAPI, Request
 
 from app.api.errors import install_error_handlers
+from app.api.routes import router as documents_router
 from app.config import Settings, get_settings
 from app.conversion.converters import ConverterProvider
 from app.conversion.service import ConversionService
@@ -123,4 +124,5 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
 
     install_error_handlers(app)
     app.include_router(health_router)
+    app.include_router(documents_router)
     return app

@@ -26,17 +26,21 @@ class ApiError(Exception):
         self.message = message
 
 
-def _envelope(status_code: int, code: str, message: str) -> JSONResponse:
+def _envelope(
+    status_code: int, code: str, message: str, headers: dict | None = None
+) -> JSONResponse:
     return JSONResponse(
         status_code=status_code,
         content={"error": {"code": code, "message": message}},
+        headers=headers,
     )
 
 
 def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _handle_api_error(_: Request, exc: ApiError) -> JSONResponse:
-        return _envelope(exc.status_code, exc.code, exc.message)
+        headers = {"Retry-After": "30"} if exc.status_code == 503 else None
+        return _envelope(exc.status_code, exc.code, exc.message, headers)
 
     @app.exception_handler(StarletteHTTPException)
     async def _handle_http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:
