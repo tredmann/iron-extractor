@@ -109,14 +109,18 @@ class JobStore:
             cursor = self._db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
             self._db.commit()
             deleted = cursor.rowcount > 0
-        self._paths.remove(job_id)
-        job_dir = self._paths.job_dir(job_id)
-        if job_dir.exists():
-            logger.warning(
-                "Failed to remove job directory for %s at %s; it may need manual cleanup.",
-                job_id,
-                job_dir,
-            )
+        # Only touch the filesystem when a row actually went away. Deleting
+        # nothing must delete nothing: an id with no row is an id this store
+        # never created, so its "directory" is not ours to remove.
+        if deleted:
+            self._paths.remove(job_id)
+            job_dir = self._paths.job_dir(job_id)
+            if job_dir.exists():
+                logger.warning(
+                    "Failed to remove job directory for %s at %s; it may need manual cleanup.",
+                    job_id,
+                    job_dir,
+                )
         return deleted
 
     def recover_interrupted(self) -> list[str]:

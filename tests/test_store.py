@@ -71,6 +71,18 @@ def test_delete_unknown_returns_false(store: JobStore):
     assert store.delete("missing") is False
 
 
+def test_delete_of_an_unknown_id_touches_no_directory(tmp_path: Path, store: JobStore):
+    """Deleting nothing must delete nothing. The directory removal used to
+    run unconditionally, outside the rowcount check, so an id with no row
+    still reached rmtree."""
+    paths = JobPaths(tmp_path)
+    paths.create("job-1")
+    paths.markdown_file("job-1").write_text("keep me")
+
+    assert store.delete("job-1") is False  # no row was ever created
+    assert paths.markdown_file("job-1").read_text() == "keep me"
+
+
 def test_recover_interrupted(store: JobStore):
     store.create("queued-job", "a.pdf", {})
     store.create("running-job", "b.pdf", {})

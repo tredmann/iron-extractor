@@ -41,6 +41,33 @@ def test_remove_is_idempotent(tmp_path: Path):
     JobPaths(tmp_path).remove("never-existed")
 
 
+@pytest.mark.parametrize("job_id", ["..", ".", "../..", "../other"])
+def test_remove_rejects_ids_that_escape_the_jobs_root(tmp_path: Path, job_id: str):
+    """`..` resolves to DATA_DIR and `.` to the jobs root itself; rmtree on
+    either destroys the database and every other job. Both arrive here
+    verbatim from a `{job_id}` path parameter, so the guard is the only
+    thing standing between a percent-encoded DELETE and the whole volume."""
+    paths = JobPaths(tmp_path)
+    paths.create("job-1")
+    sentinel = tmp_path / "jobs.sqlite3"
+    sentinel.write_text("db")
+
+    with pytest.raises(ValueError):
+        paths.remove(job_id)
+
+    assert sentinel.exists()
+    assert paths.jobs_root.is_dir()
+    assert paths.job_dir("job-1").is_dir()
+
+
+@pytest.mark.parametrize("job_id", ["job-1", "0f2a1d3c-0000-4000-8000-000000000000", "a.b"])
+def test_remove_still_accepts_legitimate_ids(tmp_path: Path, job_id: str):
+    paths = JobPaths(tmp_path)
+    paths.create(job_id)
+    paths.remove(job_id)
+    assert not paths.job_dir(job_id).exists()
+
+
 def test_input_file_sanitizes(tmp_path: Path):
     paths = JobPaths(tmp_path)
     resolved = paths.input_file("job-1", "../../evil.pdf")

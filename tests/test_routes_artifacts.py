@@ -167,3 +167,36 @@ def test_artifacts_of_a_running_job_are_409(client, auth, recording_service):
 
     recording_service.release()
     assert client.app.state.pool.wait_idle(timeout=5)
+
+
+def test_delete_with_a_dot_dot_id_cannot_destroy_the_data_directory(
+    client, auth, settings, finished_job
+):
+    """Regression test: `DELETE /v1/documents/%2e%2e` used to wipe DATA_DIR.
+
+    Uvicorn percent-decodes the path before Starlette routes it, and the
+    `str` converter matches `[^/]+`, so `..` arrives as a literal `{job_id}`.
+    `JobStore.delete` then called `JobPaths.remove("..")` unconditionally --
+    even with no row deleted -- and `rmtree(jobs_root / "..")` is
+    `rmtree(DATA_DIR)`: the database, its WAL and every job's artifacts.
+    """
+    paths = JobPaths(settings.data_dir)
+
+    response = client.delete("/v1/documents/%2e%2e", headers=auth)
+
+    assert response.status_code == 404
+    assert settings.db_path.exists(), "the job database was destroyed"
+    assert paths.jobs_root.is_dir(), "the jobs root was destroyed"
+    assert paths.job_dir(finished_job).is_dir(), "an unrelated job was destroyed"
+    assert client.get(f"/v1/documents/{finished_job}", headers=auth).status_code == 200
+
+
+def test_delete_with_a_single_dot_id_is_rejected(client, auth, settings, finished_job):
+    """`.` resolves to the jobs root itself -- every job at once."""
+    paths = JobPaths(settings.data_dir)
+
+    response = client.delete("/v1/documents/%2e", headers=auth)
+
+    assert response.status_code == 404
+    assert paths.jobs_root.is_dir()
+    assert paths.job_dir(finished_job).is_dir()

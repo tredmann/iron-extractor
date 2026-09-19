@@ -62,4 +62,16 @@ class JobPaths:
             directory.mkdir(parents=True, exist_ok=True)
 
     def remove(self, job_id: str) -> None:
-        shutil.rmtree(self.job_dir(job_id), ignore_errors=True)
+        """Delete a job's directory, refusing anything that is not one.
+
+        The containment check is load-bearing, not decorative: `job_id`
+        reaches here straight from a `{job_id}` path parameter, and uvicorn
+        percent-decodes the path before Starlette routes it, so `..` and `.`
+        both match the `str` converter's `[^/]+` and arrive as literal ids.
+        Unguarded, `rmtree(jobs_root / "..")` is `rmtree(DATA_DIR)` -- the
+        database, its WAL and every other job. Same guard as image_file().
+        """
+        target = self.job_dir(job_id)
+        if target.resolve().parent != self.jobs_root.resolve():
+            raise ValueError(f"Illegal job id: {job_id!r}")
+        shutil.rmtree(target, ignore_errors=True)
