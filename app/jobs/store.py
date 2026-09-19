@@ -1,4 +1,5 @@
 import json
+import logging
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -6,6 +7,8 @@ from pathlib import Path
 
 from app.jobs.models import Job, JobStatus
 from app.storage.paths import JobPaths
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
@@ -49,9 +52,10 @@ class JobStore:
         self._conn.commit()
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     @property
     def _db(self) -> sqlite3.Connection:
@@ -106,6 +110,13 @@ class JobStore:
             self._db.commit()
             deleted = cursor.rowcount > 0
         self._paths.remove(job_id)
+        job_dir = self._paths.job_dir(job_id)
+        if job_dir.exists():
+            logger.warning(
+                "Failed to remove job directory for %s at %s; it may need manual cleanup.",
+                job_id,
+                job_dir,
+            )
         return deleted
 
     def recover_interrupted(self) -> list[str]:

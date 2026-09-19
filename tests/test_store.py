@@ -1,3 +1,4 @@
+import threading
 from pathlib import Path
 
 import pytest
@@ -97,3 +98,43 @@ def test_survives_reopen(tmp_path: Path):
     second.connect()
     assert second.get("job-1") is not None
     second.close()
+
+
+def test_concurrent_writes_from_multiple_threads(store: JobStore):
+    """Several worker threads hammer the same connection concurrently.
+
+    Exercises the check_same_thread=False + lock combination for real:
+    each thread creates its own job, transitions it through running to
+    succeeded, and reads it back mid-flight, all racing against the other
+    threads' writes on the same connection. A threading.Barrier forces
+    every thread to start at once instead of relying on incidental
+    scheduling, so the test deterministically exercises contention rather
+    than hoping for it.
+    """
+    job_count = 8
+    job_ids = [f"job-{i}" for i in range(job_count)]
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(job_count)
+
+    def worker(job_id: str) -> None:
+        try:
+            barrier.wait()
+            store.create(job_id, f"{job_id}.pdf", {})
+            store.mark_running(job_id)
+            store.get(job_id)
+            store.mark_succeeded(job_id, {"job_id": job_id})
+        except BaseException as exc:  # noqa: BLE001 - captured for the assertion below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(job_id,)) for job_id in job_ids]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    for job_id in job_ids:
+        job = store.get(job_id)
+        assert job is not None
+        assert job.status is JobStatus.SUCCEEDED
+        assert job.manifest == {"job_id": job_id}
