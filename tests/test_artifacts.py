@@ -150,3 +150,124 @@ def test_image_less_picture_is_skipped_without_disturbing_later_index(paths):
     assert entry["page"] == 1
     assert entry["bytes"] > 0
     assert paths.image_file("job-1", "picture-001.png").exists()
+
+
+def test_a_failing_table_export_does_not_discard_the_conversion(document, paths, monkeypatch):
+    """One unexportable table must not throw away a whole successful
+    conversion. Before this, the exception escaped write_artifacts and the
+    worker marked the job failed/internal_error -- discarding the markdown
+    and document.json already on disk, plus every minute of OCR spent."""
+    from docling_core.types.doc import TableItem
+
+    def boom(self, doc=None, **kwargs):
+        raise RuntimeError("dataframe export blew up")
+
+    monkeypatch.setattr(TableItem, "export_to_dataframe", boom)
+
+    manifest = write_artifacts(document, paths, "job-1")
+
+    assert manifest["tables"] == []
+    assert "Fixture Document" in paths.markdown_file("job-1").read_text(encoding="utf-8")
+    assert json.loads(paths.document_file("job-1").read_text(encoding="utf-8"))["name"] == "fixture"
+    assert len(manifest["warnings"]) == 1
+    assert "Table 0" in manifest["warnings"][0]
+    assert "dataframe export blew up" in manifest["warnings"][0]
+    # The rest of the document survives intact.
+    assert len(manifest["images"]) == 1
+
+
+def test_a_failing_html_table_export_is_also_survivable(document, paths, monkeypatch):
+    from docling_core.types.doc import TableItem
+
+    def boom(self, doc=None, **kwargs):
+        raise ValueError("html export blew up")
+
+    monkeypatch.setattr(TableItem, "export_to_html", boom)
+
+    manifest = write_artifacts(document, paths, "job-1")
+
+    assert manifest["tables"] == []
+    assert "html export blew up" in manifest["warnings"][0]
+    assert paths.markdown_file("job-1").exists()
+
+
+def test_a_failing_picture_export_does_not_discard_the_conversion(document, paths, monkeypatch):
+    from docling_core.types.doc import PictureItem
+
+    def boom(self, doc=None, **kwargs):
+        raise OSError("cannot write PNG")
+
+    monkeypatch.setattr(PictureItem, "get_image", boom)
+
+    manifest = write_artifacts(document, paths, "job-1")
+
+    assert manifest["images"] == []
+    assert len(manifest["tables"]) == 1
+    assert paths.markdown_file("job-1").exists()
+    assert paths.document_file("job-1").exists()
+    assert len(manifest["warnings"]) == 1
+    assert "Picture 0" in manifest["warnings"][0]
+    assert "cannot write PNG" in manifest["warnings"][0]
+
+
+def test_per_item_warnings_join_the_ones_passed_in(document, paths, monkeypatch):
+    from docling_core.types.doc import TableItem
+
+    monkeypatch.setattr(
+        TableItem,
+        "export_to_dataframe",
+        lambda self, doc=None, **kwargs: (_ for _ in ()).throw(RuntimeError("nope")),
+    )
+
+    manifest = write_artifacts(document, paths, "job-1", warnings=["docling said so"])
+
+    assert manifest["warnings"][0] == "docling said so"
+    assert "Table 0" in manifest["warnings"][1]
+
+
+def test_one_bad_table_does_not_stop_the_next_one(paths, monkeypatch):
+    doc = DoclingDocument(name="two-tables")
+    cells = [
+        TableCell(text="only", start_row_offset_idx=0, end_row_offset_idx=1,
+                  start_col_offset_idx=0, end_col_offset_idx=1, column_header=True),
+    ]
+    doc.add_table(data=TableData(num_rows=1, num_cols=1, table_cells=cells), prov=_prov(1))
+    doc.add_table(data=TableData(num_rows=1, num_cols=1, table_cells=cells), prov=_prov(2))
+
+    from docling_core.types.doc import TableItem
+
+    real = TableItem.export_to_dataframe
+    calls: list[int] = []
+
+    def only_the_first_fails(self, doc=None, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("first table is broken")
+        return real(self, doc=doc, **kwargs)
+
+    monkeypatch.setattr(TableItem, "export_to_dataframe", only_the_first_fails)
+
+    manifest = write_artifacts(doc, paths, "job-1")
+
+    assert len(manifest["tables"]) == 1
+    assert manifest["tables"][0]["index"] == 1
+    assert len(manifest["warnings"]) == 1
+
+
+def test_picture_kind_comes_from_the_docling_label(paths):
+    """`PictureItem.label` is a DocItemLabel and is not always 'picture' --
+    docling labels a chart as `chart`. The manifest used to hardcode
+    'picture', losing that classification."""
+    from docling_core.types.doc import DocItemLabel
+
+    doc = DoclingDocument(name="chart-doc")
+    doc.add_picture(
+        image=ImageRef.from_pil(Image.new("RGB", (8, 8), "green"), dpi=72),
+        prov=_prov(1),
+    )
+    doc.pictures[0].label = DocItemLabel.CHART
+
+    manifest = write_artifacts(doc, paths, "job-1")
+
+    assert manifest["images"][0]["kind"] == "chart"
+    assert isinstance(manifest["images"][0]["kind"], str)

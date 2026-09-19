@@ -54,7 +54,14 @@ class ConversionService:
                 "conversion_failed", "docling returned no document for this input."
             )
 
-        warnings = messages if status == _PARTIAL_SUCCESS else []
+        # Every message docling collected is surfaced, for SUCCESS as well
+        # as PARTIAL_SUCCESS. docling routinely returns SUCCESS alongside
+        # non-fatal component errors -- an OCR backend failing one page, a
+        # table model declining a region -- and those are exactly the
+        # diagnostics an operator needs when a caller reports missing
+        # content. Dropping them on the SUCCESS branch made that
+        # unanswerable.
+        warnings = messages
         if warnings:
             logger.warning("Job %s converted with warnings: %s", job_id, _join(warnings))
 

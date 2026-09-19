@@ -16,17 +16,28 @@ def write_artifacts(
 
     Takes a `docling_core.types.doc.DoclingDocument`. Typed loosely so this
     module imports nothing from docling itself.
+
+    Markdown and the document JSON are the conversion: if either fails the
+    job has produced nothing and the exception propagates. Individual tables
+    and pictures are not -- one unexportable table must not discard a whole
+    document (and, with OCR, minutes of work), so each is written
+    defensively and a failure becomes a warning rather than a dead job.
     """
     markdown_bytes = _write_markdown(document, paths, job_id)
     document_bytes = _write_document_json(document, paths, job_id)
 
+    tables, table_warnings = _write_tables(document, paths, job_id)
+    images, picture_warnings = _write_pictures(document, paths, job_id)
+
     return {
         "page_count": document.num_pages(),
-        "warnings": list(warnings or []),
+        # Warnings from the caller (docling's own component errors) come
+        # first; per-item export failures found here are appended.
+        "warnings": [*(warnings or []), *table_warnings, *picture_warnings],
         "markdown": {"bytes": markdown_bytes},
         "document": {"bytes": document_bytes},
-        "tables": _write_tables(document, paths, job_id),
-        "images": _write_pictures(document, paths, job_id),
+        "tables": tables,
+        "images": images,
     }
 
 
@@ -44,18 +55,19 @@ def _write_document_json(document, paths: JobPaths, job_id: str) -> int:
     return target.stat().st_size
 
 
-def _write_tables(document, paths: JobPaths, job_id: str) -> list[dict]:
+def _write_tables(document, paths: JobPaths, job_id: str) -> tuple[list[dict], list[str]]:
     entries: list[dict] = []
+    warnings: list[str] = []
     for index, table in enumerate(document.tables):
-        csv_target = paths.table_file(job_id, index, "csv")
-        html_target = paths.table_file(job_id, index, "html")
+        try:
+            csv_target = paths.table_file(job_id, index, "csv")
+            html_target = paths.table_file(job_id, index, "html")
 
-        frame = table.export_to_dataframe(doc=document)
-        frame.to_csv(csv_target, index=False)
-        html_target.write_text(table.export_to_html(doc=document), encoding="utf-8")
+            frame = table.export_to_dataframe(doc=document)
+            frame.to_csv(csv_target, index=False)
+            html_target.write_text(table.export_to_html(doc=document), encoding="utf-8")
 
-        entries.append(
-            {
+            entry = {
                 "index": index,
                 "rows": table.data.num_rows,
                 "cols": table.data.num_cols,
@@ -63,34 +75,66 @@ def _write_tables(document, paths: JobPaths, job_id: str) -> list[dict]:
                 "csv": csv_target.name,
                 "html": html_target.name,
             }
-        )
-    return entries
-
-
-def _write_pictures(document, paths: JobPaths, job_id: str) -> list[dict]:
-    entries: list[dict] = []
-    for index, picture in enumerate(document.pictures):
-        image = picture.get_image(document)
-        if image is None:
-            # The pipeline ran without generate_picture_images; nothing to save.
-            logger.debug("Picture %d of job %s carries no image", index, job_id)
+        except Exception as exc:
+            # No manifest entry is appended, so the artifact routes will
+            # answer 404 for this index; any half-written file left behind
+            # is unreachable and goes away with the job.
+            logger.exception("Job %s: table %d could not be exported", job_id, index)
+            warnings.append(
+                f"Table {index} could not be exported and was skipped: "
+                f"{type(exc).__name__}: {exc}"
+            )
             continue
+        entries.append(entry)
+    return entries, warnings
 
-        name = f"picture-{index:03d}.png"
-        target = paths.image_file(job_id, name)
-        image.save(target, format="PNG")
 
-        entries.append(
-            {
+def _write_pictures(document, paths: JobPaths, job_id: str) -> tuple[list[dict], list[str]]:
+    entries: list[dict] = []
+    warnings: list[str] = []
+    for index, picture in enumerate(document.pictures):
+        try:
+            image = picture.get_image(document)
+            if image is None:
+                # The pipeline ran without generate_picture_images; nothing
+                # to save, and nothing worth warning about.
+                logger.debug("Picture %d of job %s carries no image", index, job_id)
+                continue
+
+            name = f"picture-{index:03d}.png"
+            target = paths.image_file(job_id, name)
+            image.save(target, format="PNG")
+
+            entry = {
                 "name": name,
-                "kind": "picture",
+                "kind": _label_of(picture),
                 "page": _page_of(picture),
                 "bytes": target.stat().st_size,
             }
-        )
-    return entries
+        except Exception as exc:
+            logger.exception("Job %s: picture %d could not be exported", job_id, index)
+            warnings.append(
+                f"Picture {index} could not be exported and was skipped: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
+        entries.append(entry)
+    return entries, warnings
 
 
 def _page_of(item) -> int | None:
     provenance = getattr(item, "prov", None)
     return provenance[0].page_no if provenance else None
+
+
+def _label_of(item) -> str:
+    """The item's docling label as a plain string.
+
+    `PictureItem.label` is a `DocItemLabel` enum and is not always
+    `picture` -- a chart is labelled `chart`. Rendered via `.value` so the
+    manifest stays plain JSON, with a fallback for anything unlabelled.
+    """
+    label = getattr(item, "label", None)
+    if label is None:
+        return "picture"
+    return str(getattr(label, "value", label))
