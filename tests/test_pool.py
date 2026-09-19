@@ -192,3 +192,113 @@ def test_missing_input_file_fails_the_job(harness):
     assert job.status is JobStatus.FAILED
     assert job.error_type == "input_missing"
     assert service.calls == []
+
+
+def test_idle_is_cleared_before_the_item_becomes_visible(harness):
+    """enqueue() must clear _idle before the item is visible to a worker.
+
+    Otherwise a concurrent wait_idle() caller can observe a false "idle"
+    between the put and a worker picking the item up. This asserts the
+    happens-before ordering directly (deterministic) rather than timing it.
+    """
+    store, paths = harness
+    service = RecordingService()
+    pool = WorkerPool(store, service, paths, threads=1, queue_max=4)
+    pool.start()
+    try:
+        assert pool.wait_idle(timeout=5)  # starts genuinely idle
+
+        original_put_nowait = pool._queue.put_nowait
+        observed: dict = {}
+
+        def spy_put_nowait(item):
+            observed["idle_was_already_cleared"] = not pool._idle.is_set()
+            return original_put_nowait(item)
+
+        pool._queue.put_nowait = spy_put_nowait
+
+        _seed_job(store, paths, "job-1")
+        pool.enqueue("job-1")
+        assert pool.wait_idle(timeout=5)
+    finally:
+        pool.stop(grace_seconds=5)
+
+    assert observed["idle_was_already_cleared"] is True
+
+
+class _RaisingMarkRunningStore:
+    """Wraps a real JobStore but makes mark_running raise.
+
+    Used to prove that a store-layer failure between "job resolved" and
+    "service invoked" still lands the job in a terminal state, instead of
+    stranding it as RUNNING forever.
+    """
+
+    def __init__(self, store: JobStore) -> None:
+        self._store = store
+
+    def get(self, job_id):
+        return self._store.get(job_id)
+
+    def mark_running(self, job_id):
+        raise RuntimeError("store is broken")
+
+    def mark_succeeded(self, job_id, manifest):
+        return self._store.mark_succeeded(job_id, manifest)
+
+    def mark_failed(self, job_id, error_type, error_message):
+        return self._store.mark_failed(job_id, error_type, error_message)
+
+
+def test_store_failure_during_mark_running_still_fails_the_job(harness):
+    store, paths = harness
+    wrapped_store = _RaisingMarkRunningStore(store)
+    service = RecordingService()
+    pool = WorkerPool(wrapped_store, service, paths, threads=1, queue_max=4)
+    pool.start()
+    try:
+        _seed_job(store, paths, "job-1")
+        pool.enqueue("job-1")
+        assert pool.wait_idle(timeout=5)
+        assert pool.worker_count == 1
+    finally:
+        pool.stop(grace_seconds=5)
+
+    job = store.get("job-1")
+    assert job.status is JobStatus.FAILED
+    assert job.error_type == "internal_error"
+    assert service.calls == []
+
+
+class _ThoroughlyBrokenStore:
+    """Even mark_failed raises. The worker must survive and move on."""
+
+    def __init__(self, store: JobStore) -> None:
+        self._store = store
+
+    def get(self, job_id):
+        return self._store.get(job_id)
+
+    def mark_running(self, job_id):
+        raise RuntimeError("mark_running is broken")
+
+    def mark_succeeded(self, job_id, manifest):
+        raise AssertionError("should not be called")
+
+    def mark_failed(self, job_id, error_type, error_message):
+        raise RuntimeError("mark_failed is also broken")
+
+
+def test_worker_survives_when_mark_failed_itself_raises(harness):
+    store, paths = harness
+    wrapped_store = _ThoroughlyBrokenStore(store)
+    service = RecordingService()
+    pool = WorkerPool(wrapped_store, service, paths, threads=1, queue_max=4)
+    pool.start()
+    try:
+        _seed_job(store, paths, "job-1")
+        pool.enqueue("job-1")
+        assert pool.wait_idle(timeout=5)
+        assert pool.worker_count == 1
+    finally:
+        pool.stop(grace_seconds=5)
