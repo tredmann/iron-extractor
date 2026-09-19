@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import APIRouter, FastAPI, Request
+from fastapi.openapi.utils import get_openapi
 
 from app.api.errors import install_error_handlers
 from app.api.routes import router as documents_router
@@ -141,4 +142,29 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
     install_error_handlers(app)
     app.include_router(health_router)
     app.include_router(documents_router)
+
+    def custom_openapi() -> dict:
+        """Strip the auto-generated 422/HTTPValidationError from every
+        operation. FastAPI adds it to any route with a non-empty parameter
+        set (Security(api_key_header) counts), but our RequestValidationError
+        handler always converts validation failures to 400 with the project's
+        error envelope, so a 422 is advertised but can never actually be
+        sent. Cached on this app instance only -- not module-level state --
+        so the many apps the test suite builds in one process never share a
+        schema."""
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = get_openapi(
+            title=app.title,
+            version=app.version,
+            description=app.description,
+            routes=app.routes,
+        )
+        for path in schema.get("paths", {}).values():
+            for operation in path.values():
+                operation.get("responses", {}).pop("422", None)
+        app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi
     return app

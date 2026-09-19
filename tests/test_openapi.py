@@ -54,3 +54,23 @@ def test_docs_can_be_disabled(tmp_path, recording_service):
 
 def test_docs_page_renders(client):
     assert client.get("/docs").status_code == 200
+
+
+def test_no_operation_advertises_the_dead_auto_422(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    for path, operations in paths.items():
+        for method, operation in operations.items():
+            assert "422" not in operation["responses"], (
+                f"{method.upper()} {path} still advertises an unreachable 422; "
+                "validation failures are always rendered as 400 by the "
+                "RequestValidationError handler."
+            )
+
+
+def test_stripping_422_leaves_the_rest_of_a_route_intact(client):
+    responses = client.get("/openapi.json").json()["paths"]["/v1/documents/{job_id}/markdown"][
+        "get"
+    ]["responses"]
+    assert "422" not in responses
+    for code in ("200", "401", "404", "409"):
+        assert code in responses
