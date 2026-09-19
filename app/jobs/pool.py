@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 
 _SHUTDOWN = object()
 
+# How often an idle worker wakes on its own to re-check `_stopping`, instead
+# of relying solely on a shutdown sentinel reaching it. Sized well under any
+# sane grace period (seconds) while staying negligible against normal
+# operation (an idle worker just re-blocks after a cheap queue.Empty).
+_SHUTDOWN_POLL_SECONDS = 0.1
+
 
 class QueueFull(Exception):
     """The conversion queue is at capacity."""
@@ -79,14 +85,23 @@ class WorkerPool:
         `grace_seconds` bounds the whole of stop() rather than only the
         part following them.
 
-        The sentinels go in with `put_nowait`. A blocking `put` on a full
-        queue waits for a worker to take an item -- and workers take
-        queued jobs, not sentinels -- so at SIGTERM with a full queue and
-        a 600s document timeout this could block for many minutes, past
-        any grace period, on the event loop's thread. A sentinel that does
-        not fit is not needed anyway: a full queue means every worker has
-        an item waiting, and now *any* item makes a worker exit. Sentinels
-        only exist to wake a worker blocked on an empty queue.
+        Sentinels are offered with a single best-effort `put_nowait` pass,
+        same as before -- but they are now a latency shortcut, not the
+        correctness mechanism. A one-shot pass here previously *was* the
+        only way to wake a worker blocked on an empty queue, and when
+        `queue_max < len(self._threads)` the queue could only ever hold
+        `queue_max` sentinels: the rest raised `queue.Full` with nothing
+        left to retry them, and those workers sat on their blocking
+        `get()` until the join deadline, stranding them until this
+        process's next restart. `_run()` now bounds its `get()` with
+        `_SHUTDOWN_POLL_SECONDS` and rechecks `_stopping` on every timeout,
+        so a worker notices shutdown on its own within one poll interval
+        regardless of whether a sentinel ever reached it or how the queue
+        is sized relative to the thread count. A sentinel that does not
+        fit is genuinely fine now: a full queue means every worker either
+        has an item waiting (and now *any* item makes it exit, per the
+        `_stopping` check below) or is about to time out its `get()` and
+        check `_stopping` directly.
 
         Lock note: this method touches the queue's lock alone and never
         `_in_flight_lock`, so it cannot invert the one-directional
@@ -99,9 +114,9 @@ class WorkerPool:
             try:
                 self._queue.put_nowait(_SHUTDOWN)
             except queue.Full:
-                # Retry on the next iteration in case a worker has since
-                # freed a slot; if none ever does, the queued items
-                # themselves are what wake the remaining workers.
+                # No retry needed: a worker that never sees a sentinel
+                # still notices `_stopping` on its next `get()` timeout,
+                # within _SHUTDOWN_POLL_SECONDS.
                 logger.debug("Queue full while offering a shutdown sentinel")
         for thread in self._threads:
             thread.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -147,7 +162,22 @@ class WorkerPool:
 
     def _run(self) -> None:
         while True:
-            item = self._queue.get()
+            # Bounded, not `self._queue.get()`: a plain blocking get() only
+            # ever wakes for an item actually landing in the queue, so a
+            # worker parked on an empty queue depended entirely on a
+            # shutdown sentinel reaching it. When queue_max is smaller than
+            # the thread count that could not be guaranteed (see stop()'s
+            # docstring) and the worker was stranded until the join
+            # deadline. Timing out here instead means every worker rechecks
+            # `_stopping` on its own at least every _SHUTDOWN_POLL_SECONDS,
+            # independent of queue capacity or whether a sentinel arrived.
+            try:
+                item = self._queue.get(timeout=_SHUTDOWN_POLL_SECONDS)
+            except queue.Empty:
+                if self._stopping.is_set():
+                    return
+                continue
+
             if item is _SHUTDOWN:
                 return
 

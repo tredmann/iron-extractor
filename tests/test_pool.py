@@ -386,6 +386,49 @@ def test_stop_returns_promptly_when_the_queue_is_full(harness):
     assert elapsed < 1.0, f"stop() blocked for {elapsed:.1f}s on a full queue"
 
 
+@pytest.mark.parametrize("threads,queue_max", [(4, 1), (8, 2), (2, 1)])
+def test_stop_returns_promptly_when_queue_is_smaller_than_thread_count(
+    harness, threads, queue_max
+):
+    """Regression test: stop() used to offer each worker a single
+    `put_nowait(_SHUTDOWN)` attempt. When `queue_max < threads`, the queue
+    could only ever hold `queue_max` sentinels; the rest raised
+    `queue.Full` with no retry, and those workers -- parked on a blocking
+    `get()` on an otherwise empty, idle queue -- were never woken. They sat
+    there until the join deadline (consuming the *entire* grace period)
+    and were then silently dropped from `self._threads`, stranded for
+    good.
+
+    This pins an idle pool (every worker genuinely parked on an empty
+    queue, not mid-conversion) at exactly the sizes the regression was
+    measured at, and asserts stop() returns promptly with every worker
+    thread actually dead -- not just absent from the pool's own bookkeeping,
+    which `stop()` clears unconditionally regardless of whether join
+    succeeded.
+    """
+    import time
+
+    store, paths = harness
+    service = RecordingService()
+    pool = WorkerPool(store, service, paths, threads=threads, queue_max=queue_max)
+    pool.start()
+    assert pool.wait_idle(timeout=5)  # every worker parked on get(), queue empty
+
+    threads_before = list(pool._threads)
+    began = time.monotonic()
+    pool.stop(grace_seconds=5.0)
+    elapsed = time.monotonic() - began
+
+    assert elapsed < 1.0, (
+        f"stop() took {elapsed:.2f}s for threads={threads}, queue_max={queue_max}"
+        " -- a worker was likely stranded until the join deadline"
+    )
+    assert all(not t.is_alive() for t in threads_before), (
+        f"threads={threads}, queue_max={queue_max}: a worker thread is still"
+        " alive after stop() returned"
+    )
+
+
 def test_stop_does_not_start_queued_work(harness):
     """The grace period is for conversions already running. Sentinels at
     the tail of the queue meant shutdown drained the whole backlog first,
