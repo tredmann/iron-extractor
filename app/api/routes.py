@@ -171,6 +171,10 @@ async def get_image(request: Request, job_id: str, name: str) -> FileResponse:
         raise ApiError(404, "not_found", f"Job {job_id} has no image {name!r}.")
 
     try:
+        # Defence-in-depth: a manifest entry always names a docling-generated
+        # file, so this branch is unreachable via any legitimate request. It
+        # exists in case the membership check above is ever loosened or
+        # bypassed -- keep it rather than treating it as dead code.
         path = get_paths(request).image_file(job_id, name)
     except ValueError as exc:
         raise ApiError(400, "invalid_request", f"Illegal image name {name!r}.") from exc

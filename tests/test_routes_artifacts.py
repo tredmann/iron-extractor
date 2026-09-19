@@ -89,11 +89,30 @@ def test_unknown_image_is_404(client, auth, finished_job):
     assert response.status_code == 404
 
 
-def test_image_traversal_is_rejected(client, auth, finished_job):
+def test_image_traversal_with_a_slash_never_reaches_the_handler(client, auth, finished_job):
+    """A slash-containing segment is rejected by Starlette's routing before
+    `get_image` ever runs -- this is a routing-level 404, not evidence that
+    either of this task's defences (manifest lookup, JobPaths.image_file)
+    fired. See test_image_traversal_without_a_slash_is_rejected_by_the_manifest
+    for a case that actually exercises the handler."""
     response = client.get(
         f"/v1/documents/{finished_job}/images/..%2F..%2Fjobs.sqlite3", headers=auth
     )
-    assert response.status_code in (400, 404)
+    assert response.status_code == 404
+
+
+def test_image_traversal_without_a_slash_is_rejected_by_the_manifest(client, auth, finished_job):
+    """An encoded literal '..' (no slash) does reach `get_image`. It fails the
+    manifest membership check -- the first line of defence -- and comes back
+    as the application's own 404 envelope naming the image, not a framework
+    route-miss and not JobPaths.image_file's ValueError guard."""
+    response = client.get(
+        f"/v1/documents/{finished_job}/images/%2e%2e", headers=auth
+    )
+    assert response.status_code == 404
+    body = response.json()
+    assert body["error"]["code"] == "not_found"
+    assert ".." in body["error"]["message"]
 
 
 def test_artifacts_require_a_key(client, finished_job):
@@ -129,3 +148,22 @@ def test_delete_removes_job_and_files(client, auth, settings, finished_job):
 
 def test_delete_unknown_job_is_404(client, auth):
     assert client.delete("/v1/documents/ghost", headers=auth).status_code == 404
+
+
+def test_artifacts_of_a_running_job_are_409(client, auth, recording_service):
+    """A job that exists but hasn't finished must be distinguishable from one
+    that never existed. Gate the fake service deterministically (no sleeps)
+    so the job is observably `running` when we hit the artifact route."""
+    recording_service.hold = True
+    job_id = client.post(
+        "/v1/documents", headers=auth,
+        files={"file": ("a.pdf", b"%PDF-1.4", "application/pdf")},
+    ).json()["id"]
+    assert recording_service.entered.wait(timeout=5)
+
+    response = client.get(f"/v1/documents/{job_id}/markdown", headers=auth)
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "conflict"
+
+    recording_service.release()
+    assert client.app.state.pool.wait_idle(timeout=5)
