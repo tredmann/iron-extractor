@@ -302,3 +302,52 @@ def test_worker_survives_when_mark_failed_itself_raises(harness):
         assert pool.worker_count == 1
     finally:
         pool.stop(grace_seconds=5)
+
+
+def test_enqueue_prevents_a_concurrent_leave_job_from_falsely_reporting_idle(harness):
+    """Regression test for the enqueue/_leave_job race left open by the first
+    ordering fix.
+
+    Round 1 made enqueue() clear _idle *before* calling put_nowait, as two
+    separate, unguarded statements. That closed the original window but
+    opened an equivalent one: a concurrent _leave_job() (the last in-flight
+    job finishing) landing between those two statements reads queue.empty()
+    as still True (the new item hasn't been put yet) and incorrectly sets
+    idle back to True, even though the item about to be enqueued is still
+    pending.
+
+    This is reproduced deterministically without real thread scheduling: a
+    non-blocking, non-reentrant self-acquire of _in_flight_lock from inside
+    a monkeypatched put_nowait either succeeds instantly (enqueue is NOT
+    holding the lock across the mutation -- the bug) or fails instantly
+    (enqueue IS holding it for the whole operation -- the fix). No timing
+    assumptions, no sleeps, no real second thread required.
+    """
+    store, paths = harness
+    service = RecordingService()
+    pool = WorkerPool(store, service, paths, threads=1, queue_max=4)
+    # Deliberately do not start() the pool: this test drives _enter_job
+    # directly to simulate "one job already in flight" and needs no real
+    # worker thread to reproduce the interleaving.
+    _seed_job(store, paths, "job-1")
+
+    pool._enter_job()  # simulate: job A already in flight, queue empty
+
+    original_put_nowait = pool._queue.put_nowait
+
+    def racing_put_nowait(item):
+        # Simulate a concurrent _leave_job() (job A finishing) landing
+        # exactly between "idle cleared" and "item visible in the queue".
+        if pool._in_flight_lock.acquire(blocking=False):
+            try:
+                pool._in_flight -= 1
+                pool._update_idle_locked()
+            finally:
+                pool._in_flight_lock.release()
+        return original_put_nowait(item)
+
+    pool._queue.put_nowait = racing_put_nowait
+
+    pool.enqueue("job-1")
+
+    assert pool._idle.is_set() is False

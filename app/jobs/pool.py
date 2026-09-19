@@ -58,18 +58,30 @@ class WorkerPool:
         self._threads.clear()
 
     def enqueue(self, job_id: str) -> None:
-        # Clear idle *before* the item becomes visible to a consumer, so a
-        # concurrent wait_idle() can never observe a false "idle" between the
-        # put and a worker picking the item up.
-        self._idle.clear()
-        try:
-            self._queue.put_nowait(job_id)
-        except queue.Full as exc:
-            # The put never happened; nothing became visible to a worker, so
-            # re-derive the true idle state instead of leaving it stale-cleared.
-            with self._in_flight_lock:
+        # The queue mutation and the idle-state update must be atomic with
+        # respect to _leave_job()'s read of queue.empty(): if they were two
+        # unguarded statements (clear idle, *then* put), a concurrent
+        # _leave_job() landing in between could see the queue as still
+        # empty and incorrectly set idle back to True while this item sits
+        # unprocessed. Holding _in_flight_lock across the whole thing closes
+        # that window entirely -- no item can become visible in the queue
+        # while a concurrent idle recompute is possible.
+        #
+        # Lock ordering: _in_flight_lock is always acquired before touching
+        # the queue's internal lock (via put_nowait/empty), never the other
+        # way around -- _run()'s queue.get() releases the queue's lock
+        # before _enter_job() ever asks for _in_flight_lock. Keep it that
+        # way; acquiring in the reverse order anywhere would risk deadlock.
+        with self._in_flight_lock:
+            self._idle.clear()
+            try:
+                self._queue.put_nowait(job_id)
+            except queue.Full as exc:
+                # The put never happened; nothing became visible to a
+                # worker, so re-derive the true idle state instead of
+                # leaving it stale-cleared.
                 self._update_idle_locked()
-            raise QueueFull(job_id) from exc
+                raise QueueFull(job_id) from exc
 
     @property
     def queue_depth(self) -> int:
@@ -149,7 +161,11 @@ class WorkerPool:
     def _enter_job(self) -> None:
         with self._in_flight_lock:
             self._in_flight += 1
-            self._idle.clear()
+            # Routed through the shared definition (rather than an inline
+            # self._idle.clear()) so idle has exactly one definition: an
+            # in-flight count above zero always makes _update_idle_locked()
+            # clear it anyway, but this keeps that fact in one place.
+            self._update_idle_locked()
 
     def _leave_job(self) -> None:
         with self._in_flight_lock:
