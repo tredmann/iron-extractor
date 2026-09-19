@@ -1,0 +1,20 @@
+services:
+  api:
+    build: .
+    image: docling-extraction-api:latest
+    ports:
+      - "8000:8000"
+    environment:
+      API_KEYS: ${API_KEYS:-dev-key}
+      DATA_DIR: /data
+      MODELS_DIR: /opt/models
+      WORKER_THREADS: ${WORKER_THREADS:-2}
+      QUEUE_MAX: ${QUEUE_MAX:-32}
+      JOB_TIMEOUT_SECONDS: ${JOB_TIMEOUT_SECONDS:-600}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - docling-data:/data
+    restart: unless-stopped
+
+volumes:
+  docling-data:
