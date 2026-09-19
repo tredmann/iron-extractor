@@ -200,3 +200,41 @@ def test_delete_with_a_single_dot_id_is_rejected(client, auth, settings, finishe
     assert response.status_code == 404
     assert paths.jobs_root.is_dir()
     assert paths.job_dir(finished_job).is_dir()
+
+
+def test_markdown_renders_inline(client, auth, finished_job):
+    """`filename=` makes Starlette send Content-Disposition: attachment, so
+    Swagger UI's try-it-out showed a download link instead of the converted
+    Markdown -- the first thing an integrator wants to see."""
+    response = client.get(f"/v1/documents/{finished_job}/markdown", headers=auth)
+    assert "attachment" not in response.headers.get("content-disposition", "")
+
+
+def test_document_json_renders_inline(client, auth, finished_job):
+    response = client.get(f"/v1/documents/{finished_job}/document.json", headers=auth)
+    assert "attachment" not in response.headers.get("content-disposition", "")
+
+
+def test_table_csv_renders_inline(client, auth, finished_job):
+    response = client.get(f"/v1/documents/{finished_job}/tables/0", headers=auth)
+    assert "attachment" not in response.headers.get("content-disposition", "")
+
+
+def test_image_renders_inline(client, auth, finished_job):
+    response = client.get(
+        f"/v1/documents/{finished_job}/images/picture-000.png", headers=auth
+    )
+    assert "attachment" not in response.headers.get("content-disposition", "")
+
+
+def test_table_html_stays_an_attachment_with_nosniff(client, auth, finished_job):
+    """The one artifact that must not render inline: docling-derived HTML
+    served from the API's own origin."""
+    response = client.get(
+        f"/v1/documents/{finished_job}/tables/0?format=html", headers=auth
+    )
+    assert response.status_code == 200
+    assert response.headers["content-disposition"].startswith("attachment")
+    assert "table-000.html" in response.headers["content-disposition"]
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["content-type"].startswith("text/html")

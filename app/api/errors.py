@@ -11,7 +11,10 @@ _STATUS_CODES = {
     400: "invalid_request",
     401: "unauthorized",
     404: "not_found",
+    405: "method_not_allowed",
     409: "conflict",
+    413: "payload_too_large",
+    415: "unsupported_media_type",
     503: "unavailable",
 }
 
@@ -26,9 +29,14 @@ class ApiError(Exception):
         self.message = message
 
 
-def _envelope(
+def error_response(
     status_code: int, code: str, message: str, headers: dict | None = None
 ) -> JSONResponse:
+    """The project's one error shape: {"error": {"code", "message"}}.
+
+    Public so non-route layers -- an ASGI middleware that answers before
+    routing ever happens -- can produce the same envelope as the handlers.
+    """
     return JSONResponse(
         status_code=status_code,
         content={"error": {"code": code, "message": message}},
@@ -40,23 +48,23 @@ def install_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(ApiError)
     async def _handle_api_error(_: Request, exc: ApiError) -> JSONResponse:
         headers = {"Retry-After": "30"} if exc.status_code == 503 else None
-        return _envelope(exc.status_code, exc.code, exc.message, headers)
+        return error_response(exc.status_code, exc.code, exc.message, headers)
 
     @app.exception_handler(StarletteHTTPException)
     async def _handle_http_error(_: Request, exc: StarletteHTTPException) -> JSONResponse:
         code = _STATUS_CODES.get(exc.status_code, "error")
-        return _envelope(exc.status_code, code, str(exc.detail))
+        return error_response(exc.status_code, code, str(exc.detail))
 
     @app.exception_handler(RequestValidationError)
     async def _handle_validation_error(
         _: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        return _envelope(400, "invalid_request", _first_validation_message(exc))
+        return error_response(400, "invalid_request", _first_validation_message(exc))
 
     @app.exception_handler(Exception)
     async def _handle_unexpected(_: Request, exc: Exception) -> JSONResponse:
         logger.exception("Unhandled error", exc_info=exc)
-        return _envelope(500, "internal_error", "An unexpected error occurred.")
+        return error_response(500, "internal_error", "An unexpected error occurred.")
 
 
 def _first_validation_message(exc: RequestValidationError) -> str:

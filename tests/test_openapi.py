@@ -74,3 +74,26 @@ def test_stripping_422_leaves_the_rest_of_a_route_intact(client):
     assert "422" not in responses
     for code in ("200", "401", "404", "409"):
         assert code in responses
+
+
+def test_artifact_routes_declare_their_response_media_type(client):
+    """Without a `content` entry on the 200, the schema does not say what
+    any of these routes return -- and the spec's bar is that Swagger UI is
+    enough to integrate against without reading the source."""
+    paths = client.get("/openapi.json").json()["paths"]
+    expected = {
+        "/v1/documents/{job_id}/markdown": ["text/markdown"],
+        "/v1/documents/{job_id}/document.json": ["application/json"],
+        "/v1/documents/{job_id}/tables/{index}": ["text/csv", "text/html"],
+        "/v1/documents/{job_id}/images/{name}": ["image/png"],
+    }
+    for route, media_types in expected.items():
+        ok = paths[route]["get"]["responses"]["200"]
+        assert "content" in ok, f"{route} declares no response media type"
+        for media_type in media_types:
+            assert media_type in ok["content"], f"{route} does not declare {media_type}"
+
+
+def test_upload_route_declares_413(client):
+    responses = client.get("/openapi.json").json()["paths"]["/v1/documents"]["post"]["responses"]
+    assert "413" in responses

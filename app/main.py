@@ -6,6 +6,7 @@ from fastapi.openapi.utils import get_openapi
 from starlette.concurrency import run_in_threadpool
 
 from app.api.errors import install_error_handlers
+from app.api.limits import ContentLengthLimitMiddleware
 from app.api.routes import router as documents_router
 from app.config import Settings, get_settings
 from app.conversion.converters import ConverterProvider
@@ -144,6 +145,13 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
     app.state.pool = pool
     app.state.models_loaded = models_loaded
 
+    # Outermost of the app's own middleware, so an over-sized body is
+    # refused before routing, before the multipart parser spools it to
+    # disk, and therefore before authentication -- which FastAPI resolves
+    # only after the body has already been read.
+    app.add_middleware(
+        ContentLengthLimitMiddleware, max_bytes=settings.max_upload_bytes
+    )
     install_error_handlers(app)
     app.include_router(health_router)
     app.include_router(documents_router)

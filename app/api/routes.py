@@ -27,6 +27,42 @@ _CONFLICT = {
 _QUEUE_FULL = {
     503: {"model": ErrorEnvelope, "description": "The conversion queue is at capacity."}
 }
+_TOO_LARGE = {
+    413: {"model": ErrorEnvelope, "description": "The request body exceeds MAX_UPLOAD_BYTES."}
+}
+
+# Artifact routes stream files, so FastAPI has no response_model to infer a
+# media type from and the generated 200 would carry no `content` at all --
+# leaving an integrator unable to tell from the schema what any of these
+# four routes actually return. Declared explicitly, matching the media
+# types passed to _serve().
+_TEXT = {"schema": {"type": "string"}}
+_BINARY = {"schema": {"type": "string", "format": "binary"}}
+
+_MARKDOWN_OK = {
+    200: {
+        "description": "The converted document as Markdown.",
+        "content": {"text/markdown": _TEXT},
+    }
+}
+_DOCUMENT_OK = {
+    200: {
+        "description": "The full DoclingDocument as JSON.",
+        "content": {"application/json": {"schema": {"type": "object"}}},
+    }
+}
+_TABLE_OK = {
+    200: {
+        "description": "One extracted table. CSV by default, HTML with ?format=html.",
+        "content": {"text/csv": _TEXT, "text/html": _TEXT},
+    }
+}
+_IMAGE_OK = {
+    200: {
+        "description": "One extracted image, always PNG.",
+        "content": {"image/png": _BINARY},
+    }
+}
 
 OPTIONS_EXAMPLE = '{"ocr": true, "ocr_languages": ["en", "de"], "table_mode": "accurate", "image_scale": 2.0}'
 
@@ -47,7 +83,7 @@ def _write_upload(source, target: Path) -> None:
     status_code=status.HTTP_202_ACCEPTED,
     response_model=JobCreated,
     summary="Upload a document for conversion",
-    responses={**_INVALID, **_UNAUTHORIZED, **_QUEUE_FULL},
+    responses={**_INVALID, **_UNAUTHORIZED, **_TOO_LARGE, **_QUEUE_FULL},
 )
 async def create_document(
     request: Request,
@@ -129,17 +165,38 @@ def _require_succeeded(request: Request, job_id: str) -> Job:
     return job
 
 
-def _serve(path, media_type: str, filename: str) -> FileResponse:
+def _serve(
+    path,
+    media_type: str,
+    label: str,
+    *,
+    download: bool = False,
+    headers: dict | None = None,
+) -> FileResponse:
+    """Serve an artifact file, inline unless a download is asked for.
+
+    `filename=` makes Starlette send `Content-Disposition: attachment`,
+    which turns every artifact into a download: Swagger UI's try-it-out
+    shows a download link instead of the converted Markdown, which is the
+    first thing anyone integrating against this API wants to see. Passing
+    it only for the cases that genuinely want saving keeps the rest
+    renderable in a browser.
+    """
     if not path.exists():
-        raise ApiError(404, "not_found", f"{filename} is not available for this job.")
-    return FileResponse(path, media_type=media_type, filename=filename)
+        raise ApiError(404, "not_found", f"{label} is not available for this job.")
+    return FileResponse(
+        path,
+        media_type=media_type,
+        filename=label if download else None,
+        headers=headers,
+    )
 
 
 @router.get(
     "/documents/{job_id}/markdown",
     response_class=FileResponse,
     summary="Fetch the converted document as Markdown",
-    responses={**_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
+    responses={**_MARKDOWN_OK, **_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
 )
 async def get_markdown(request: Request, job_id: str) -> FileResponse:
     _require_succeeded(request, job_id)
@@ -152,7 +209,7 @@ async def get_markdown(request: Request, job_id: str) -> FileResponse:
     "/documents/{job_id}/document.json",
     response_class=FileResponse,
     summary="Fetch the full DoclingDocument JSON",
-    responses={**_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
+    responses={**_DOCUMENT_OK, **_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
 )
 async def get_document_json(request: Request, job_id: str) -> FileResponse:
     _require_succeeded(request, job_id)
@@ -165,7 +222,7 @@ async def get_document_json(request: Request, job_id: str) -> FileResponse:
     "/documents/{job_id}/tables/{index}",
     response_class=FileResponse,
     summary="Fetch one extracted table as CSV or HTML",
-    responses={**_INVALID, **_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
+    responses={**_TABLE_OK, **_INVALID, **_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
 )
 async def get_table(
     request: Request,
@@ -178,16 +235,29 @@ async def get_table(
     if not any(entry["index"] == index for entry in tables):
         raise ApiError(404, "not_found", f"Job {job_id} has no table {index}.")
 
-    media_type = "text/csv; charset=utf-8" if format == "csv" else "text/html; charset=utf-8"
     path = get_paths(request).table_file(job_id, index, format)
-    return _serve(path, media_type, f"table-{index:03d}.{format}")
+    label = f"table-{index:03d}.{format}"
+    if format == "html":
+        # The one artifact served as an attachment. This is docling-derived
+        # HTML rendered from the API's own origin, so serving it inline
+        # would let a crafted document's markup run against this origin --
+        # the only genuinely risky case among the artifacts. nosniff keeps
+        # a browser from re-interpreting it as something else again.
+        return _serve(
+            path,
+            "text/html; charset=utf-8",
+            label,
+            download=True,
+            headers={"X-Content-Type-Options": "nosniff"},
+        )
+    return _serve(path, "text/csv; charset=utf-8", label)
 
 
 @router.get(
     "/documents/{job_id}/images/{name}",
     response_class=FileResponse,
     summary="Fetch one extracted image",
-    responses={**_INVALID, **_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
+    responses={**_IMAGE_OK, **_INVALID, **_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
 )
 async def get_image(request: Request, job_id: str, name: str) -> FileResponse:
     job = _require_succeeded(request, job_id)

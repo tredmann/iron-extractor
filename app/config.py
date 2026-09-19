@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     job_timeout_seconds: float = 600.0
     converter_cache_size: int = 4
     shutdown_grace_seconds: float = 30.0
+    max_upload_bytes: int = 200 * 1024 * 1024
 
     default_ocr: bool = True
     default_ocr_languages: str = "en"
