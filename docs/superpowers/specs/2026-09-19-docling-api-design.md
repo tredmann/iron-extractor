@@ -366,3 +366,20 @@ Considered and deliberately deferred:
 - **`ProcessPoolExecutor` workers** — true parallelism at roughly 1.5–2 GB of weights per
   process. Adopt only if threads measurably bottleneck.
 - **S3/MinIO artifact storage** — needed only for stateless multi-replica deploys.
+
+## Refinements made during planning
+
+Verifying the docling 2.129.0 API surfaced six points where this design needed
+adjusting. They are listed with their rationale in the "Refinements to the spec"
+section of `docs/superpowers/plans/2026-09-19-docling-extraction-api.md`, and that
+plan is authoritative where the two differ. In brief:
+
+1. `queue.Queue`, not `asyncio.Queue` — the consumers are OS threads.
+2. The per-thread converter cache is a bounded LRU of `CONVERTER_CACHE_SIZE`
+   (default 4), replacing the "rebuild past 8 pipelines" rule.
+3. Non-timeout `PARTIAL_SUCCESS` counts as success, with docling's messages
+   recorded in the manifest under `warnings`.
+4. The OCR engine is pinned to EasyOCR rather than docling's `OcrAutoOptions()`.
+5. Worker supervision is structural — the loop body cannot let an exception
+   escape — rather than a separate monitor thread.
+6. Requirements are split three ways so the fast test suite installs without torch.
