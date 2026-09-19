@@ -53,6 +53,12 @@ def test_image_file_rejects_traversal(tmp_path: Path):
         paths.image_file("job-1", "../../../etc/passwd")
 
 
+def test_image_file_resolves_legitimate_name(tmp_path: Path):
+    paths = JobPaths(tmp_path)
+    resolved = paths.image_file("job-1", "picture-000.png")
+    assert resolved == paths.images_dir("job-1") / "picture-000.png"
+
+
 def test_table_file_naming(tmp_path: Path):
     paths = JobPaths(tmp_path)
     assert paths.table_file("job-1", 7, "csv").name == "table-007.csv"
