@@ -26,6 +26,8 @@ curl http://localhost:8000/v1/documents/<id> -H "X-API-Key: dev-key"
 # 3. List what the document produced (or read `result` from step 2 — same data)
 curl http://localhost:8000/v1/documents/<id>/images -H "X-API-Key: dev-key"
 curl http://localhost:8000/v1/documents/<id>/tables -H "X-API-Key: dev-key"
+curl http://localhost:8000/v1/documents/<id>/pages   -H "X-API-Key: dev-key"
+curl http://localhost:8000/v1/documents/<id>/pages/1 -H "X-API-Key: dev-key"
 
 # 4. Fetch artifacts
 curl http://localhost:8000/v1/documents/<id>/markdown       -H "X-API-Key: dev-key"
@@ -92,6 +94,39 @@ render in a browser and in Swagger's try-it-out. HTML tables (`?format=html`)
 are the exception: they are sent as an attachment with `X-Content-Type-Options:
 nosniff`, since that content comes from the converted document and is served
 from the API's own origin.
+
+### Pages
+
+`GET /v1/documents/{id}/pages` returns every page with its content inline;
+`GET /v1/documents/{id}/pages/{page_no}` returns one.
+
+```json
+{
+  "page": 3,
+  "width": 612.0,
+  "height": 792.0,
+  "markdown": "## Revenue\n\nRevenue held steady...",
+  "text": "Revenue\n\nRevenue held steady...",
+  "images": [ { "name": "picture-002.png", "kind": "chart", ... } ],
+  "tables": [ { "index": 1, "rows": 4, "cols": 3, ... } ]
+}
+```
+
+A page's `images` and `tables` entries are exactly the `/images` and `/tables`
+entries carrying that page number.
+
+Two properties worth knowing before you build against this:
+
+- **Pages do not always sum to the document.** Content docling could not place
+  on a page appears in `/markdown` and in no page's export. If you need
+  guaranteed-complete text, use `/markdown` or `document.json` — not a
+  concatenation of pages.
+- **`/pages` is unbounded.** Response size grows with the document; a long scan
+  produces a large response. This is deliberate, so that one request gets the
+  whole document page by page. Use `/pages/{page_no}` where that matters.
+
+`markdown` and `text` are `null` only when a page is listed but its file could
+not be read. A page docling registered but extracted nothing from returns `""`.
 
 ## Configuration
 

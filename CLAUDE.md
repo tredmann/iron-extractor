@@ -103,6 +103,15 @@ is the drift guard. The check is skipped when `ocr` is false, because
 unexpected exception in full and records only its type — docling failures
 routinely embed container-internal paths under `MODELS_DIR`.
 
+**The `/pages` routes are the only handlers that read artifact bytes
+themselves.** Every other artifact route hands Starlette a `FileResponse`,
+which it serves off the loop. `/pages` inlines content, so it reads the files
+directly -- and on a long document that is many reads. They go through
+`run_in_threadpool` for that reason; doing them inline would stall every other
+request in this single-process server. `_read_page_text` returns `None` for an
+unreadable file rather than raising, so one missing file cannot sink a whole
+`/pages` response.
+
 **Exactly one uvicorn worker.** The queue and thread pool live in the process;
 a second uvicorn worker means a second queue contending over one SQLite file.
 Scale with `WORKER_THREADS`.
@@ -115,17 +124,18 @@ otherwise the docs advertise a response the server never sends.
 **The manifest is a cross-module contract.** `artifacts.write_artifacts`
 produces `page_count`/`warnings`/`markdown.bytes`/`document.bytes`/
 `tables[].index,rows,cols,page,csv,html,caption,self_ref,bbox`/
-`images[].index,name,kind,page,bytes,width,height,caption,self_ref,bbox`, and
-the HTTP layer reads exactly those. It stores **filenames**; the HTTP layer
-builds URLs. Changing a key breaks three modules.
+`images[].index,name,kind,page,bytes,width,height,caption,self_ref,bbox`/
+`pages[].page,width,height,markdown,text`, and the HTTP layer reads exactly
+those. It stores **filenames**; the HTTP layer builds URLs. Changing a key
+breaks three modules.
 
 `schemas.build_image_refs` / `build_table_refs` are the *only* place the HTTP
-side reads those arrays. `_build_result` and the `/images` and `/tables`
-listing routes all call them, which is what keeps the job detail and the
-listings from drifting;
-`tests/test_routes_listings.py::test_listing_matches_the_job_detail_exactly`
-is the guard. Both read with `.get()` so a manifest written before a field
-existed still renders, as null.
+side reads those arrays, and `build_page_details` is the only place it reads
+`pages[]`. `_build_result` and the `/images` and `/tables` listing routes all
+call the former pair, which is what keeps the job detail and the listings from
+drifting; `tests/test_routes_listings.py::test_listing_matches_the_job_detail_exactly`
+is the guard. All three read with `.get()` so a manifest written before a
+field existed still renders, as null.
 
 ## Testing approach
 
