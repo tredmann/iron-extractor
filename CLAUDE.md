@@ -3,7 +3,8 @@
 Guidance for Claude Code (claude.ai/code) working in this repository, and for
 any agent integrating this service from another codebase. Read **Architecture**
 and **Invariants** before changing code; read **The HTTP contract** and
-**Integrating this service** before calling it from elsewhere.
+**Integrating this service** before calling it from elsewhere. `CONTEXT.md`
+defines the vocabulary both halves use.
 
 ## How to work here
 
@@ -19,6 +20,12 @@ stated assumption and flag the concern.)
 then a dependency this project already has, then a new dependency, then your
 own implementation. Hand-rolling something the stdlib does is the failure this
 rule exists to prevent — but so is adding a package to avoid ten lines.
+
+**One word per concept.** `CONTEXT.md` defines this project's domain
+vocabulary and settles the three words that mean more than one thing
+(`document`, `picture`, `worker`). Use the word it names; when you introduce a
+genuinely new concept, add its entry in the same commit. Reusing a word
+already defined there needs nothing.
 
 A new dependency is itself a YAGNI decision and needs the same explicit yes.
 Every requirement here is exact-pinned (`==`), the runtime image is already

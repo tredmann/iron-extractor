@@ -225,6 +225,12 @@ docker build --target test    -t docling-api-test .
 `docker compose` already names the stage for each service (`target: runtime`
 for `api`, `target: test` for `test`), so this only applies to direct builds.
 
+## Domain language
+
+`CONTEXT.md` defines the vocabulary this project uses — what a *job* is versus
+a *document*, why *picture* and *image* are both in play, and which of the two
+kinds of *worker* any given sentence means.
+
 ## Design
 
 - Spec: `docs/superpowers/specs/2026-09-19-docling-api-design.md`
