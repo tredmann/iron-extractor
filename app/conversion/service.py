@@ -1,4 +1,5 @@
 import logging
+import re
 from pathlib import Path
 
 from app.api.schemas import ConversionOptions
@@ -9,6 +10,11 @@ logger = logging.getLogger(__name__)
 
 _SUCCESS = "success"
 _PARTIAL_SUCCESS = "partial_success"
+
+# An absolute filesystem path of at least two segments. The lookbehind keeps
+# it off URLs -- the path inside `https://host/a/b` follows a word character
+# or a slash, never the whitespace or quote a bare path follows.
+_ABSOLUTE_PATH = re.compile(r"(?<![\w:/])/(?:[\w.+-]+/)+([\w.+-]+)")
 
 
 class ConversionFailed(Exception):
@@ -36,7 +42,19 @@ class ConversionService:
         converter = self._converter_provider.get(options)
         result = converter.convert(input_path)
         status = result.status.value
-        messages = [error.error_message for error in getattr(result, "errors", [])]
+
+        # docling's own error strings reach HTTP twice -- through
+        # ConversionFailed into `job.error_message`, and through the manifest
+        # into `JobResult.warnings`. They embed container-internal paths: a
+        # missing EasyOCR weight reports its full path under MODELS_DIR, and
+        # an OSError from a full volume reports the job's own directory. The
+        # raw text is logged; only the scrubbed text travels.
+        raw_messages = [error.error_message for error in getattr(result, "errors", [])]
+        if raw_messages:
+            logger.warning(
+                "Job %s: docling reported %s", job_id, _join(raw_messages)
+            )
+        messages = [_scrub_paths(message) for message in raw_messages]
 
         if status == _PARTIAL_SUCCESS and result.has_timeout_errors():
             raise ConversionFailed(
@@ -62,10 +80,21 @@ class ConversionService:
         # content. Dropping them on the SUCCESS branch made that
         # unanswerable.
         warnings = messages
-        if warnings:
-            logger.warning("Job %s converted with warnings: %s", job_id, _join(warnings))
 
         return write_artifacts(result.document, self._paths, job_id, warnings=warnings)
+
+
+def _scrub_paths(message: str) -> str:
+    """Reduce absolute filesystem paths in a docling message to filenames.
+
+    Which file failed is the diagnostic worth keeping; where it lives is
+    container layout the caller has no business seeing. Reducing rather than
+    redacting keeps `Missing latin_g2.pth` actionable, and the untouched
+    message is in the log either way.
+    """
+    if not message:
+        return message
+    return _ABSOLUTE_PATH.sub(lambda match: match.group(1), message)
 
 
 def _join(messages: list[str]) -> str:

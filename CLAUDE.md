@@ -176,12 +176,14 @@ downstream, and treat a zero-dimension table as "detected but not parsed".
 
 **Failure detail depends on which failure it was.** `error.message` names the
 exception type only for `error_type: internal_error` — an unexpected crash,
-where the text would be a Python exception embedding a container path. For
-`timeout` and `conversion_failed`, the outcomes a real docling run actually
-produces, it carries docling's own error text. `result.warnings` likewise mixes
-two shapes: entries docling raised during conversion come through verbatim,
-while a per-item export failure (one table, picture or page) reads as the item
-plus an exception type. The full exception is always in the server logs.
+where the text would be a Python exception. For `timeout` and
+`conversion_failed`, the outcomes a real docling run actually produces, it
+carries docling's own error text. `result.warnings` likewise mixes two shapes:
+entries docling raised during conversion, and per-item export failures (one
+table, picture or page) reading as the item plus an exception type. Either way
+no absolute path survives: docling's text has its paths reduced to filenames,
+so `Missing latin_g2.pth` tells you which weight is absent without telling you
+the image's layout. The untouched text is in the server logs.
 
 **`models_loaded` is not readiness.** `/health` reports whether any converter
 has been built yet, which only happens on the first conversion. It is `false`
@@ -242,21 +244,26 @@ upgrade can shift the dispatch but never leave stale data.
 guard. The check is skipped when `ocr` is false, because `EasyOcrModel` builds
 no Reader then.
 
-**Our own exception text never reaches HTTP; docling's own error strings do.**
-Two paths, and the difference is deliberate. `WorkerPool._process`'s
-`except Exception` branch and the three per-item writers in `artifacts.py` log
-the exception in full and record only its type — a Python exception raised
-*here* embeds a container path (`MODELS_DIR`, or the job's own directory in an
-`OSError` from a full volume). But `ConversionFailed` carries `exc.message`
-through verbatim, and `ConversionService.run` builds that from docling's own
-`error_message` strings; the same strings also pass through as the leading
-entries of `manifest["warnings"]`. That is what makes a `timeout` or
-`conversion_failed` diagnosable at all. If docling is ever found to embed paths
-in those strings, scrub at the `ConversionService` boundary — do not flatten
-`ConversionFailed` to a type name, which would make every real failure opaque.
-`tests/test_pool.py::test_internal_error_message_does_not_leak_exception_detail`
-pins the first path; `test_pool.py`'s `timeout`/`"too slow"` assertions pin the
-second.
+**Nothing reaching HTTP carries a filesystem path.** Three mechanisms, each
+guarding a different source. `WorkerPool._process`'s `except Exception` branch
+and the three per-item writers in `artifacts.py` record only the exception
+*type* — a Python exception raised here embeds a container path (`MODELS_DIR`,
+or the job's own directory in an `OSError` from a full volume). docling's own
+`ErrorItem.error_message` strings are different: they are what makes a
+`timeout` or `conversion_failed` diagnosable, so they travel — but
+`ConversionService.run` puts every one through `_scrub_paths` first, which
+reduces an absolute path to its filename (`Missing latin_g2.pth`, not its full
+path under `MODELS_DIR`). Which file failed is the diagnostic; where it lives
+is layout the caller has no business seeing. The raw text is logged before
+scrubbing, so operators lose nothing.
+
+Do not flatten `ConversionFailed` to a type name — that would make every real
+failure opaque. Scrub at the boundary instead, which is where `_scrub_paths`
+already sits. Its regex deliberately spares URLs and things like `and/or` and
+`3/4`; it does not handle Windows paths, which this Linux-only image cannot
+produce. `tests/test_pool.py::test_internal_error_message_does_not_leak_exception_detail`
+pins the first mechanism, and `tests/test_service.py`'s scrubbing tests the
+third.
 
 **The `/pages` routes are the only handlers that read artifact bytes
 themselves.** Every other artifact route hands Starlette a `FileResponse`,

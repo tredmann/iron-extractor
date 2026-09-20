@@ -182,3 +182,83 @@ def test_a_broken_table_still_yields_a_successful_conversion(paths, monkeypatch)
     assert "RuntimeError" in manifest["warnings"][0]
     assert "export exploded" not in manifest["warnings"][0]
     assert paths.markdown_file("job-1").exists()
+
+
+# --- Path disclosure -------------------------------------------------------
+#
+# docling's own ErrorItem.error_message strings reach HTTP twice: through
+# ConversionFailed -> job.error_message, and through manifest["warnings"] ->
+# JobResult.warnings. They routinely embed container-internal paths -- a
+# missing EasyOCR weight reports its full path under MODELS_DIR, and an
+# OSError from a full volume reports the job's own directory.
+
+
+def _run(paths, result):
+    service = ConversionService(paths, FakeProvider(FakeConverter(result)))
+    return service.run("job-1", Path("in.pdf"), ConversionOptions())
+
+
+def test_absolute_paths_in_warnings_are_reduced_to_filenames(paths):
+    result = FakeResult(
+        "success",
+        document=DoclingDocument(name="doc"),
+        errors=[FakeError("Missing /opt/models/EasyOcr/latin_g2.pth and downloads disabled")],
+    )
+
+    manifest = _run(paths, result)
+
+    assert manifest["warnings"] == ["Missing latin_g2.pth and downloads disabled"]
+
+
+def test_absolute_paths_in_a_failure_message_are_reduced(paths):
+    result = FakeResult(
+        "partial_success",
+        document=DoclingDocument(name="doc"),
+        errors=[FakeError("[Errno 28] No space left on device: '/data/jobs/abc/output/page-001.md'")],
+        timed_out=True,
+    )
+
+    with pytest.raises(ConversionFailed) as excinfo:
+        _run(paths, result)
+
+    assert "/data/jobs" not in excinfo.value.message
+    assert "page-001.md" in excinfo.value.message
+
+
+def test_urls_survive_scrubbing(paths):
+    """Only filesystem paths are reduced; a URL is not one."""
+    result = FakeResult(
+        "success",
+        document=DoclingDocument(name="doc"),
+        errors=[FakeError("see https://docling-project.github.io/docling/faq/ for help")],
+    )
+
+    assert _run(paths, result)["warnings"] == [
+        "see https://docling-project.github.io/docling/faq/ for help"
+    ]
+
+
+def test_messages_without_paths_are_untouched(paths):
+    result = FakeResult(
+        "success",
+        document=DoclingDocument(name="doc"),
+        errors=[FakeError("Table 3 has no recoverable structure")],
+    )
+
+    assert _run(paths, result)["warnings"] == ["Table 3 has no recoverable structure"]
+
+
+def test_the_unscrubbed_message_still_reaches_the_log(paths, caplog):
+    """Operators keep the full path; only the HTTP surface loses it."""
+    import logging
+
+    result = FakeResult(
+        "success",
+        document=DoclingDocument(name="doc"),
+        errors=[FakeError("Missing /opt/models/EasyOcr/latin_g2.pth")],
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.conversion.service"):
+        _run(paths, result)
+
+    assert "/opt/models/EasyOcr/latin_g2.pth" in caplog.text
