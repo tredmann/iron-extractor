@@ -36,6 +36,12 @@ curl -X DELETE http://localhost:8000/v1/documents/<id> -H "X-API-Key: dev-key"
 Artifact routes return **409** while a job is queued or running, and **404** if the
 job does not exist — so "not ready" is always distinguishable from "not found".
 
+Markdown, `document.json`, CSV tables and images are served **inline**, so they
+render in a browser and in Swagger's try-it-out. HTML tables (`?format=html`)
+are the exception: they are sent as an attachment with `X-Content-Type-Options:
+nosniff`, since that content comes from the converted document and is served
+from the API's own origin.
+
 ## Configuration
 
 | Env var | Default | Meaning |
