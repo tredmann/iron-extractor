@@ -90,3 +90,21 @@ def test_table_file_naming(tmp_path: Path):
     paths = JobPaths(tmp_path)
     assert paths.table_file("job-1", 7, "csv").name == "table-007.csv"
     assert paths.table_file("job-1", 7, "html").name == "table-007.html"
+
+
+def test_page_file_naming(tmp_path: Path):
+    paths = JobPaths(tmp_path)
+    assert paths.page_file("job-1", 3, "md") == paths.pages_dir("job-1") / "page-003.md"
+    assert paths.page_file("job-1", 3, "txt").name == "page-003.txt"
+
+
+def test_page_numbers_beyond_three_digits_are_not_truncated(tmp_path: Path):
+    """A 1000-page scan must not collide page 1024 with anything else."""
+    paths = JobPaths(tmp_path)
+    assert paths.page_file("job-1", 1024, "md").name == "page-1024.md"
+
+
+def test_create_makes_the_pages_directory(tmp_path: Path):
+    paths = JobPaths(tmp_path)
+    paths.create("job-1")
+    assert paths.pages_dir("job-1").is_dir()

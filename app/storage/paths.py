@@ -32,6 +32,9 @@ class JobPaths:
     def images_dir(self, job_id: str) -> Path:
         return self.output_dir(job_id) / "images"
 
+    def pages_dir(self, job_id: str) -> Path:
+        return self.output_dir(job_id) / "pages"
+
     def markdown_file(self, job_id: str) -> Path:
         return self.output_dir(job_id) / "document.md"
 
@@ -40,6 +43,15 @@ class JobPaths:
 
     def table_file(self, job_id: str, index: int, fmt: str) -> Path:
         return self.tables_dir(job_id) / f"table-{index:03d}.{fmt}"
+
+    def page_file(self, job_id: str, page_no: int, fmt: str) -> Path:
+        """Resolve one page's exported artifact.
+
+        `page_no` arrives as an int (it is an integer path parameter on the
+        route, and a docling page key here), so unlike `image_file` there is
+        no traversal surface and no containment check to make.
+        """
+        return self.pages_dir(job_id) / f"page-{page_no:03d}.{fmt}"
 
     def image_file(self, job_id: str, name: str) -> Path:
         """Resolve an image by name, refusing anything that escapes the job."""
@@ -58,6 +70,7 @@ class JobPaths:
             self.output_dir(job_id),
             self.tables_dir(job_id),
             self.images_dir(job_id),
+            self.pages_dir(job_id),
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
