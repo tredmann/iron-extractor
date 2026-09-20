@@ -239,7 +239,12 @@ def _read_page_text(path: Path) -> str | None:
     """
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
+        # ValueError covers UnicodeDecodeError, which is what a page
+        # truncated mid-multibyte raises -- exactly the write that
+        # `_write_pages`' own try/except exists to survive. Catching only
+        # OSError turned one corrupt file into a 500 for the whole
+        # response, which is the opposite of this function's purpose.
         return None
 
 

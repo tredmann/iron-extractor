@@ -205,3 +205,25 @@ def test_is_404_for_an_unknown_job(client, auth, path):
 @pytest.mark.parametrize("path", ["pages", "pages/1"])
 def test_requires_a_key(client, path):
     assert client.get(f"/v1/documents/whatever/{path}").status_code == 401
+
+
+def test_invalid_utf8_in_a_page_file_is_null_not_a_500(client, auth, recording_service, settings):
+    """A page truncated mid-multibyte must not sink the whole response.
+
+    `read_text` raises UnicodeDecodeError — a ValueError, not an OSError —
+    so catching only OSError turned a corrupt page into a 500 for every
+    page, defeating the guarantee that one bad file degrades to null.
+    """
+    job_id = _succeeded_job(client, auth, recording_service, settings, write_files=False)
+
+    paths = JobPaths(settings.data_dir)
+    # A lone continuation byte: valid on disk, undecodable as UTF-8.
+    paths.page_file(job_id, 1, "md").write_bytes(b"\xff\xfe broken")
+    paths.page_file(job_id, 1, "txt").write_text("fine", encoding="utf-8")
+
+    response = client.get(f"/v1/documents/{job_id}/pages", headers=auth)
+
+    assert response.status_code == 200
+    pages = response.json()["pages"]
+    assert pages[0]["markdown"] is None   # undecodable degrades to null
+    assert pages[0]["text"] == "fine"     # its sibling is unaffected

@@ -483,3 +483,45 @@ def test_a_failing_page_export_does_not_discard_the_conversion(document, paths, 
     assert "page export blew up" not in manifest["warnings"][0]
     assert len(manifest["images"]) == 1
     assert paths.document_file("job-1").exists()
+
+
+def test_pages_directory_is_created_if_it_is_missing(document, paths):
+    """A job directory made by an older version has no pages/ subdirectory.
+
+    `recover_interrupted()` re-queues jobs that were queued when the service
+    restarted, so the first conversions after a deploy run against
+    directories the previous version created. Without this, every page of
+    every such job fails and a 300-page document returns 300 warnings.
+    """
+    import shutil
+
+    shutil.rmtree(paths.pages_dir("job-1"))
+
+    manifest = write_artifacts(document, paths, "job-1")
+
+    assert [entry["page"] for entry in manifest["pages"]] == [1, 2]
+    assert manifest["warnings"] == []
+
+
+def test_unresolvable_caption_does_not_discard_an_exported_table(document, paths, monkeypatch):
+    """Cosmetic metadata must not erase content already written to disk.
+
+    caption_text resolves references through the document, so a dangling
+    caption ref raises. That happens *after* the CSV and HTML are written,
+    and it used to drop the manifest entry — leaving the files on disk but
+    unreachable, and the table missing from /tables and from its page.
+    """
+    from docling_core.types.doc import TableItem
+
+    def boom(self, doc=None, **kwargs):
+        raise KeyError("dangling caption ref")
+
+    monkeypatch.setattr(TableItem, "caption_text", boom)
+
+    manifest = write_artifacts(document, paths, "job-1")
+
+    assert len(manifest["tables"]) == 1
+    entry = manifest["tables"][0]
+    assert entry["caption"] is None       # the metadata degrades...
+    assert entry["csv"] == "table-000.csv"  # ...the artifact survives
+    assert paths.table_file("job-1", 0, "csv").exists()

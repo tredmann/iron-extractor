@@ -76,9 +76,6 @@ def _write_tables(document, paths: JobPaths, job_id: str) -> tuple[list[dict], l
                 "page": _page_of(table),
                 "csv": csv_target.name,
                 "html": html_target.name,
-                "caption": _caption_of(table, document),
-                "self_ref": _self_ref_of(table),
-                "bbox": _bbox_of(table),
             }
         except Exception as exc:
             # No manifest entry is appended, so the artifact routes will
@@ -96,7 +93,7 @@ def _write_tables(document, paths: JobPaths, job_id: str) -> tuple[list[dict], l
                 f"Table {index} could not be exported and was skipped ({type(exc).__name__})."
             )
             continue
-        entries.append(entry)
+        entries.append({**entry, **_metadata_of(table, document)})
     return entries, warnings
 
 
@@ -128,9 +125,6 @@ def _write_pictures(document, paths: JobPaths, job_id: str) -> tuple[list[dict],
                 # Free: the image is already decoded in memory.
                 "width": image.width,
                 "height": image.height,
-                "caption": _caption_of(picture, document),
-                "self_ref": _self_ref_of(picture),
-                "bbox": _bbox_of(picture),
             }
         except Exception as exc:
             # Type only, not the message -- see the matching comment in
@@ -141,7 +135,7 @@ def _write_pictures(document, paths: JobPaths, job_id: str) -> tuple[list[dict],
                 f"Picture {index} could not be exported and was skipped ({type(exc).__name__})."
             )
             continue
-        entries.append(entry)
+        entries.append({**entry, **_metadata_of(picture, document)})
     return entries, warnings
 
 
@@ -158,6 +152,11 @@ def _write_pages(document, paths: JobPaths, job_id: str) -> tuple[list[dict], li
     """
     entries: list[dict] = []
     warnings: list[str] = []
+    # `JobPaths.create` makes this directory at upload time, but a job that
+    # was queued when the service restarted onto a version that knows about
+    # pages is re-run against a directory the *previous* version created,
+    # which has none. Without this every page of every such job fails.
+    paths.pages_dir(job_id).mkdir(parents=True, exist_ok=True)
     for page_no in sorted(document.pages):
         try:
             markdown_target = paths.page_file(job_id, page_no, "md")
@@ -206,6 +205,30 @@ def _label_of(item) -> str:
     if label is None:
         return "picture"
     return str(getattr(label, "value", label))
+
+
+def _metadata_of(item, document) -> dict:
+    """Caption, node ref and bounding box, degrading to None individually.
+
+    Deliberately outside the callers' export `try`: these are cosmetic, and
+    they are computed *after* the CSV/HTML/PNG has been written. Letting one
+    of them raise there dropped the manifest entry for an artifact that was
+    already on disk, so the file existed but its route answered 404 and the
+    item vanished from the listings. `caption_text` resolves references
+    through the document, so a dangling ref is a real way for that to
+    happen.
+    """
+    metadata = {"caption": None, "self_ref": None, "bbox": None}
+    for key, extract in (
+        ("caption", lambda: _caption_of(item, document)),
+        ("self_ref", lambda: _self_ref_of(item)),
+        ("bbox", lambda: _bbox_of(item)),
+    ):
+        try:
+            metadata[key] = extract()
+        except Exception:
+            logger.exception("Could not read %s for %s", key, type(item).__name__)
+    return metadata
 
 
 def _bbox_of(item) -> dict | None:
