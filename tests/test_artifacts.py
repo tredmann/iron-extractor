@@ -351,3 +351,101 @@ def test_bottom_left_coordinates_are_reported_as_such(paths):
         "l": 72.0, "t": 640.5, "r": 523.2, "b": 310.8,
         "coord_origin": "BOTTOMLEFT",
     }
+
+
+def test_writes_one_markdown_and_one_text_file_per_page(document, paths):
+    """Note: the `document` fixture's title and body copy have no provenance,
+    so page 1 holds only the table and page 2 only the picture."""
+    manifest = write_artifacts(document, paths, "job-1")
+
+    assert [entry["page"] for entry in manifest["pages"]] == [1, 2]
+    assert manifest["pages"][0] == {
+        "page": 1, "width": 600.0, "height": 800.0,
+        "markdown": "page-001.md", "text": "page-001.txt",
+    }
+    assert paths.page_file("job-1", 1, "md").exists()
+    assert paths.page_file("job-1", 1, "txt").exists()
+
+
+def test_page_exports_contain_only_that_page(paths):
+    doc = DoclingDocument(name="two-pages")
+    doc.add_page(page_no=1, size=Size(width=600, height=800))
+    doc.add_page(page_no=2, size=Size(width=600, height=800))
+    doc.add_text(label="text", text="ONLY ON ONE", prov=_prov(1))
+    doc.add_text(label="text", text="ONLY ON TWO", prov=_prov(2))
+
+    write_artifacts(doc, paths, "job-1")
+
+    page1 = paths.page_file("job-1", 1, "md").read_text(encoding="utf-8")
+    page2 = paths.page_file("job-1", 2, "md").read_text(encoding="utf-8")
+    assert "ONLY ON ONE" in page1 and "ONLY ON TWO" not in page1
+    assert "ONLY ON TWO" in page2 and "ONLY ON ONE" not in page2
+
+
+def test_content_without_provenance_lands_on_no_page(paths):
+    """docling cannot place it, so it is in the document but on no page.
+
+    Asserted rather than fixed: pages genuinely do not sum to the document,
+    and a client needing complete text must use /markdown. See the spec's
+    "Known limitations".
+    """
+    doc = DoclingDocument(name="stray")
+    doc.add_page(page_no=1, size=Size(width=600, height=800))
+    doc.add_text(label="text", text="PLACED", prov=_prov(1))
+    doc.add_text(label="text", text="UNPLACED")
+
+    write_artifacts(doc, paths, "job-1")
+
+    assert "UNPLACED" in paths.markdown_file("job-1").read_text(encoding="utf-8")
+    assert "UNPLACED" not in paths.page_file("job-1", 1, "md").read_text(encoding="utf-8")
+
+
+def test_text_export_is_flat_where_markdown_is_not(paths):
+    """The .txt artifact drops markdown syntax the .md artifact keeps.
+
+    Builds its own document rather than using the `document` fixture: that
+    fixture's title and body copy carry no provenance, so they land on no
+    page at all (see the no-provenance test above) and page 1 holds only
+    the table.
+    """
+    doc = DoclingDocument(name="titled")
+    doc.add_page(page_no=1, size=Size(width=600, height=800))
+    doc.add_title(text="A Heading", prov=_prov(1))
+
+    write_artifacts(doc, paths, "job-1")
+
+    assert paths.page_file("job-1", 1, "md").read_text(encoding="utf-8") == "# A Heading"
+    assert paths.page_file("job-1", 1, "txt").read_text(encoding="utf-8") == "A Heading"
+
+
+def test_document_with_no_registered_pages_yields_no_page_entries(paths):
+    doc = DoclingDocument(name="pageless")
+    doc.add_text(label="text", text="floating")
+
+    manifest = write_artifacts(doc, paths, "job-1")
+
+    assert manifest["pages"] == []
+
+
+def test_a_failing_page_export_does_not_discard_the_conversion(document, paths, monkeypatch):
+    """One unexportable page must not throw away a whole conversion.
+
+    `export_to_text` is patched rather than `export_to_markdown` because
+    only the page writer calls it -- patching markdown would break the
+    whole-document export too and the test would pass for the wrong reason.
+    """
+    from docling_core.types.doc import DoclingDocument as _Doc
+
+    def boom(self, **kwargs):
+        raise RuntimeError("page export blew up")
+
+    monkeypatch.setattr(_Doc, "export_to_text", boom)
+
+    manifest = write_artifacts(document, paths, "job-1")
+
+    assert manifest["pages"] == []
+    assert len(manifest["warnings"]) == 2
+    assert "Page 1" in manifest["warnings"][0]
+    assert "page export blew up" in manifest["warnings"][0]
+    assert len(manifest["images"]) == 1
+    assert paths.document_file("job-1").exists()

@@ -28,16 +28,18 @@ def write_artifacts(
 
     tables, table_warnings = _write_tables(document, paths, job_id)
     images, picture_warnings = _write_pictures(document, paths, job_id)
+    pages, page_warnings = _write_pages(document, paths, job_id)
 
     return {
         "page_count": document.num_pages(),
         # Warnings from the caller (docling's own component errors) come
         # first; per-item export failures found here are appended.
-        "warnings": [*(warnings or []), *table_warnings, *picture_warnings],
+        "warnings": [*(warnings or []), *table_warnings, *picture_warnings, *page_warnings],
         "markdown": {"bytes": markdown_bytes},
         "document": {"bytes": document_bytes},
         "tables": tables,
         "images": images,
+        "pages": pages,
     }
 
 
@@ -128,6 +130,50 @@ def _write_pictures(document, paths: JobPaths, job_id: str) -> tuple[list[dict],
             logger.exception("Job %s: picture %d could not be exported", job_id, index)
             warnings.append(
                 f"Picture {index} could not be exported and was skipped: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            continue
+        entries.append(entry)
+    return entries, warnings
+
+
+def _write_pages(document, paths: JobPaths, job_id: str) -> tuple[list[dict], list[str]]:
+    """Export each page's markdown and flat text to its own file.
+
+    docling takes `page_no` natively on both exporters, so there is no
+    partitioning to do here. Defensive per page, like tables and pictures:
+    one page that will not export must not discard a whole conversion.
+
+    Note that pages do not necessarily sum to the document -- content
+    docling could not place on a page appears in the whole-document export
+    and in none of these.
+    """
+    entries: list[dict] = []
+    warnings: list[str] = []
+    for page_no in sorted(document.pages):
+        try:
+            markdown_target = paths.page_file(job_id, page_no, "md")
+            text_target = paths.page_file(job_id, page_no, "txt")
+
+            markdown_target.write_text(
+                document.export_to_markdown(page_no=page_no), encoding="utf-8"
+            )
+            text_target.write_text(
+                document.export_to_text(page_no=page_no), encoding="utf-8"
+            )
+
+            size = getattr(document.pages[page_no], "size", None)
+            entry = {
+                "page": page_no,
+                "width": float(size.width) if size is not None else None,
+                "height": float(size.height) if size is not None else None,
+                "markdown": markdown_target.name,
+                "text": text_target.name,
+            }
+        except Exception as exc:
+            logger.exception("Job %s: page %s could not be exported", job_id, page_no)
+            warnings.append(
+                f"Page {page_no} could not be exported and was skipped: "
                 f"{type(exc).__name__}: {exc}"
             )
             continue
