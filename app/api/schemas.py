@@ -23,11 +23,14 @@ __all__ = [
     "JobDetail",
     "JobLinks",
     "JobResult",
+    "PageDetail",
+    "PageList",
     "TableList",
     "TableMode",
     "TableRef",
     "build_image_refs",
     "build_job_detail",
+    "build_page_details",
     "build_table_refs",
     "parse_options",
 ]
@@ -205,6 +208,38 @@ class TableList(BaseModel):
     tables: list[TableRef] = []
 
 
+class PageDetail(BaseModel):
+    """One page of a document, with its content inline.
+
+    `markdown` and `text` are null only when the page is listed in the
+    manifest but its file could not be read -- which stays distinguishable
+    from "", what a page docling registered but extracted nothing from
+    returns.
+    """
+
+    page: int
+    width: float | None = None
+    height: float | None = None
+    markdown: str | None = Field(
+        default=None, description="This page's Markdown, or null if unreadable."
+    )
+    text: str | None = Field(
+        default=None, description="This page's flat text, or null if unreadable."
+    )
+    images: list[ImageRef] = []
+    tables: list[TableRef] = []
+
+
+class PageList(BaseModel):
+    """Every page of a document, content inline.
+
+    Response size grows with the document and is deliberately unbounded;
+    `/pages/{page_no}` is the bounded alternative.
+    """
+
+    pages: list[PageDetail] = []
+
+
 class JobResult(BaseModel):
     page_count: int
     warnings: list[str] = []
@@ -318,3 +353,42 @@ def build_table_refs(job: Job, base: str) -> list[TableRef]:
         )
         for entry in (job.manifest or {}).get("tables", [])
     ]
+
+
+def build_page_details(
+    job: Job,
+    base: str,
+    contents: dict[int, tuple[str | None, str | None]],
+    only: int | None = None,
+) -> list[PageDetail]:
+    """Assemble per-page responses from the manifest and pre-read content.
+
+    Pure: `contents` maps a page number to its `(markdown, text)` pair and is
+    read by the route in a threadpool, so no file access happens here.
+
+    Images and tables come from the shared builders and are filtered by page,
+    which is what makes a page's entries byte-identical to the ones `/images`
+    and `/tables` serve. Items with no page -- docling could not place them --
+    are claimed by no page.
+    """
+    images = build_image_refs(job, base)
+    tables = build_table_refs(job, base)
+
+    details: list[PageDetail] = []
+    for entry in (job.manifest or {}).get("pages", []):
+        page_no = entry["page"]
+        if only is not None and page_no != only:
+            continue
+        markdown, text = contents.get(page_no, (None, None))
+        details.append(
+            PageDetail(
+                page=page_no,
+                width=entry.get("width"),
+                height=entry.get("height"),
+                markdown=markdown,
+                text=text,
+                images=[image for image in images if image.page == page_no],
+                tables=[table for table in tables if table.page == page_no],
+            )
+        )
+    return details
