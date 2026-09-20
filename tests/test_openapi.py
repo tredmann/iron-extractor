@@ -97,3 +97,11 @@ def test_artifact_routes_declare_their_response_media_type(client):
 def test_upload_route_declares_413(client):
     responses = client.get("/openapi.json").json()["paths"]["/v1/documents"]["post"]["responses"]
     assert "413" in responses
+
+
+def test_listing_routes_declare_their_error_responses(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    for route in ("/v1/documents/{job_id}/images", "/v1/documents/{job_id}/tables"):
+        responses = paths[route]["get"]["responses"]
+        for code in ("200", "401", "404", "409"):
+            assert code in responses, f"{route} is missing {code}"

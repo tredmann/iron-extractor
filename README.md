@@ -23,15 +23,66 @@ curl -X POST http://localhost:8000/v1/documents \
 # 2. Poll until status is succeeded or failed
 curl http://localhost:8000/v1/documents/<id> -H "X-API-Key: dev-key"
 
-# 3. Fetch artifacts
+# 3. List what the document produced (or read `result` from step 2 — same data)
+curl http://localhost:8000/v1/documents/<id>/images -H "X-API-Key: dev-key"
+curl http://localhost:8000/v1/documents/<id>/tables -H "X-API-Key: dev-key"
+
+# 4. Fetch artifacts
 curl http://localhost:8000/v1/documents/<id>/markdown       -H "X-API-Key: dev-key"
 curl http://localhost:8000/v1/documents/<id>/document.json  -H "X-API-Key: dev-key"
 curl "http://localhost:8000/v1/documents/<id>/tables/0?format=csv" -H "X-API-Key: dev-key"
 curl http://localhost:8000/v1/documents/<id>/images/picture-000.png -H "X-API-Key: dev-key" -o picture.png
 
-# 4. Reclaim the space
+# 5. Reclaim the space
 curl -X DELETE http://localhost:8000/v1/documents/<id> -H "X-API-Key: dev-key"
 ```
+
+### Listing images and tables
+
+`GET /v1/documents/{id}/images` and `GET /v1/documents/{id}/tables` return just
+one array each, in exactly the shape `result.images` / `result.tables` use on
+the job detail — so clients that only want artifacts need not parse the whole
+job. Both read the manifest and touch no files, and a document with none of a
+kind returns `{"images": []}` rather than a 404.
+
+```json
+{
+  "images": [
+    {
+      "index": 0,
+      "name": "picture-000.png",
+      "kind": "chart",
+      "page": 3,
+      "width": 1240,
+      "height": 780,
+      "caption": "Fig. 2 — Revenue by region",
+      "self_ref": "#/pictures/0",
+      "bbox": { "l": 72.0, "t": 640.5, "r": 523.2, "b": 310.8,
+                "coord_origin": "BOTTOMLEFT" },
+      "url": "/v1/documents/<id>/images/picture-000.png",
+      "bytes": 84213
+    }
+  ]
+}
+```
+
+Tables carry `caption`, `self_ref` and `bbox` alongside the existing `index`,
+`rows`, `cols`, `page`, `csv_url` and `html_url`.
+
+Notes on the metadata:
+
+- `self_ref` is docling's own node reference. It indexes straight into
+  `document.json`, which is the point — pair a listing with that artifact and
+  you can reach the item's full docling record without re-deriving it.
+- `bbox` carries `coord_origin` because docling reports PDF provenance
+  bottom-left and other sources top-left; without it `t` and `b` are
+  ambiguous. The `l`/`t`/`r`/`b` names are docling's, kept deliberately so
+  cross-referencing needs no translation. `bbox` is `null` for an item with
+  no provenance.
+- `caption` is `null`, never `""`, when an item has no caption.
+- Image `index` is docling's picture index, not the array position: pictures
+  carrying no image are omitted entirely, so the sequence can have gaps. It
+  always agrees with `self_ref`.
 
 Artifact routes return **409** while a job is queued or running, and **404** if the
 job does not exist — so "not ready" is always distinguishable from "not found".
@@ -86,13 +137,29 @@ from the API's own origin.
   attributes.
 - **Restart behavior:** jobs that were running are marked `failed` with type
   `interrupted`; jobs still queued are re-queued and run.
-- **The shipped image only bakes in English OCR weights.** The Dockerfile
-  runs `docling-tools models download ... easyocr --easyocr-lang en` (only
-  the models this app actually uses — layout, tableformer, easyocr — not
-  docling's much larger default set). Since the container runs fully
-  offline (`HF_HUB_OFFLINE=1`), requesting `ocr_languages` other than `en`
-  will fail at conversion time unless the image is rebuilt with additional
-  `--easyocr-lang` flags for the languages you need.
+- **The shipped image bakes in Latin-script OCR weights only.** The
+  Dockerfile runs `docling-tools models download ... easyocr
+  --easyocr-lang en --easyocr-lang de` (only the models this app actually
+  uses — layout, tableformer, easyocr — not docling's much larger default
+  set). EasyOCR picks a recognizer from the whole language *set* rather
+  than per language: `["en"]` exactly uses `english_g2.pth`, and every
+  other Latin-script set — `["de"]`, `["en","de"]`, `["fr"]` — uses the
+  single `latin_g2.pth`, which covers de, fr, es, it, nl, pt and the rest.
+  Both are baked in, so any Latin-script request works offline.
+
+  Non-Latin scripts (Cyrillic, Chinese, Japanese, Korean, Arabic,
+  Devanagari, Thai…) are separate weight files and are **not** shipped.
+  Because the container runs fully offline, they cannot be fetched at
+  conversion time — so `POST /v1/documents` rejects them up front with
+  **400 `unsupported_ocr_language`**, naming the weight file that is
+  missing, instead of accepting the job and failing it in a worker. To
+  enable one, rebuild with another `--easyocr-lang` flag. The same 400
+  covers language codes EasyOCR does not know, and script combinations
+  EasyOCR refuses (its non-Latin models pair only with English, so
+  `["ja","de"]` is impossible regardless of what is installed).
+
+  Requests with `"ocr": false` are never rejected on language grounds — no
+  OCR model is constructed, so `ocr_languages` is inert.
 
 ## Development
 

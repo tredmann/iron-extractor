@@ -85,6 +85,24 @@ the order deadlocks shutdown. `_update_idle_locked` is the single definition of
 `_process` in `WorkerPool._run` *is* the supervision mechanism; there is no
 monitor thread.
 
+**OCR language support is decided at the 400 boundary, not in a worker.**
+EasyOCR picks its recognizer from the whole language *set*: `["en"]`
+exactly gets `english_g2.pth`, any other Latin set gets `latin_g2.pth`.
+With `MODELS_DIR` set, docling forces `download_enabled=False`, so a
+recognizer the image lacks surfaces as a bare `FileNotFoundError` deep
+inside `_process` — after the caller already has a 202. `create_document`
+calls `app.state.check_ocr_support` *before* `paths.create`, and
+`ConverterProvider._resolve_recognizer` ports EasyOCR's dispatch ladder
+while reading every language list and filename back out of
+`easyocr.config`, so an upgrade can shift the dispatch but never leave
+stale data. `tests/test_converters.py::test_resolver_agrees_with_easyocr`
+is the drift guard. The check is skipped when `ocr` is false, because
+`EasyOcrModel` builds no Reader then.
+
+**`job.error_message` is served over HTTP.** `WorkerPool._process` logs an
+unexpected exception in full and records only its type — docling failures
+routinely embed container-internal paths under `MODELS_DIR`.
+
 **Exactly one uvicorn worker.** The queue and thread pool live in the process;
 a second uvicorn worker means a second queue contending over one SQLite file.
 Scale with `WORKER_THREADS`.
@@ -96,9 +114,18 @@ otherwise the docs advertise a response the server never sends.
 
 **The manifest is a cross-module contract.** `artifacts.write_artifacts`
 produces `page_count`/`warnings`/`markdown.bytes`/`document.bytes`/
-`tables[].index,rows,cols,page,csv,html`/`images[].name,kind,page,bytes`, and
-`schemas._build_result` reads exactly those. It stores **filenames**; the HTTP
-layer builds URLs. Changing a key breaks three modules.
+`tables[].index,rows,cols,page,csv,html,caption,self_ref,bbox`/
+`images[].index,name,kind,page,bytes,width,height,caption,self_ref,bbox`, and
+the HTTP layer reads exactly those. It stores **filenames**; the HTTP layer
+builds URLs. Changing a key breaks three modules.
+
+`schemas.build_image_refs` / `build_table_refs` are the *only* place the HTTP
+side reads those arrays. `_build_result` and the `/images` and `/tables`
+listing routes all call them, which is what keeps the job detail and the
+listings from drifting;
+`tests/test_routes_listings.py::test_listing_matches_the_job_detail_exactly`
+is the guard. Both read with `.get()` so a manifest written before a field
+existed still renders, as null.
 
 ## Testing approach
 
@@ -115,8 +142,10 @@ reason structurally rather than trusting a green run.
 ## Known gaps (deliberate, documented in README)
 
 No list route and no TTL sweeper — reclamation is manual via `DELETE`, and
-there is no API to enumerate what is on the volume. OCR weights are
-English-only in the image. Logs are plain text, not structured.
+there is no API to enumerate what is on the volume. OCR weights cover the
+Latin script only (`english_g2` + `latin_g2`); other scripts are rejected
+with 400 at request time rather than shipped. Logs are plain text, not
+structured.
 
 ## Design documents
 

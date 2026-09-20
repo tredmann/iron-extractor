@@ -43,11 +43,16 @@ def document() -> DoclingDocument:
         TableCell(text="b", start_row_offset_idx=1, end_row_offset_idx=2,
                   start_col_offset_idx=1, end_col_offset_idx=2),
     ]
-    doc.add_table(data=TableData(num_rows=2, num_cols=2, table_cells=cells), prov=_prov(1))
+    doc.add_table(
+        data=TableData(num_rows=2, num_cols=2, table_cells=cells),
+        prov=_prov(1),
+        caption=doc.add_text(label="caption", text="Table 1 - counts"),
+    )
 
     doc.add_picture(
-        image=ImageRef.from_pil(Image.new("RGB", (8, 8), "red"), dpi=72),
+        image=ImageRef.from_pil(Image.new("RGB", (8, 6), "red"), dpi=72),
         prov=_prov(2),
+        caption=doc.add_text(label="caption", text="Fig 1 - a red square"),
     )
     return doc
 
@@ -85,6 +90,9 @@ def test_writes_tables_in_both_formats(document, paths):
     assert entry == {
         "index": 0, "rows": 2, "cols": 2, "page": 1,
         "csv": "table-000.csv", "html": "table-000.html",
+        "caption": "Table 1 - counts",
+        "self_ref": "#/tables/0",
+        "bbox": {"l": 0.0, "t": 0.0, "r": 10.0, "b": 10.0, "coord_origin": "TOPLEFT"},
     }
     assert "a" in paths.table_file("job-1", 0, "csv").read_text(encoding="utf-8")
     assert "<table" in paths.table_file("job-1", 0, "html").read_text(encoding="utf-8")
@@ -99,6 +107,14 @@ def test_writes_pictures(document, paths):
     assert entry["kind"] == "picture"
     assert entry["page"] == 2
     assert entry["bytes"] > 0
+    assert entry["index"] == 0
+    assert entry["width"] == 8
+    assert entry["height"] == 6
+    assert entry["caption"] == "Fig 1 - a red square"
+    assert entry["self_ref"] == "#/pictures/0"
+    assert entry["bbox"] == {
+        "l": 0.0, "t": 0.0, "r": 10.0, "b": 10.0, "coord_origin": "TOPLEFT"
+    }
     assert paths.image_file("job-1", "picture-000.png").exists()
 
 
@@ -130,6 +146,10 @@ def test_table_without_provenance_has_null_page(paths):
     assert manifest["tables"][0] == {
         "index": 0, "rows": 1, "cols": 1, "page": None,
         "csv": "table-000.csv", "html": "table-000.html",
+        "caption": None,
+        "self_ref": "#/tables/0",
+        # No provenance means no page *and* no bounding box.
+        "bbox": None,
     }
 
 
@@ -149,6 +169,11 @@ def test_image_less_picture_is_skipped_without_disturbing_later_index(paths):
     assert entry["kind"] == "picture"
     assert entry["page"] == 1
     assert entry["bytes"] > 0
+    # `index` is docling's picture index, not the position in this array:
+    # picture 0 was skipped, so the sole entry is still index 1, and that
+    # is what `self_ref` agrees with.
+    assert entry["index"] == 1
+    assert entry["self_ref"] == "#/pictures/1"
     assert paths.image_file("job-1", "picture-001.png").exists()
 
 
@@ -271,3 +296,58 @@ def test_picture_kind_comes_from_the_docling_label(paths):
 
     assert manifest["images"][0]["kind"] == "chart"
     assert isinstance(manifest["images"][0]["kind"], str)
+
+
+def test_picture_without_provenance_has_no_page_or_bbox(paths):
+    doc = DoclingDocument(name="no-prov-picture")
+    doc.add_picture(image=ImageRef.from_pil(Image.new("RGB", (4, 9), "green"), dpi=72))
+
+    entry = write_artifacts(doc, paths, "job-1")["images"][0]
+
+    assert entry["page"] is None
+    assert entry["bbox"] is None
+    # Dimensions come off the image itself, so they survive a missing prov.
+    assert entry["width"] == 4
+    assert entry["height"] == 9
+
+
+def test_uncaptioned_items_report_null_not_empty_string(paths):
+    """docling returns "" for a missing caption; the manifest stores None.
+
+    Clients then have one absent-value check instead of two.
+    """
+    doc = DoclingDocument(name="uncaptioned")
+    doc.add_picture(image=ImageRef.from_pil(Image.new("RGB", (2, 2), "blue"), dpi=72))
+    cells = [
+        TableCell(text="only", start_row_offset_idx=0, end_row_offset_idx=1,
+                  start_col_offset_idx=0, end_col_offset_idx=1, column_header=True),
+    ]
+    doc.add_table(data=TableData(num_rows=1, num_cols=1, table_cells=cells))
+
+    manifest = write_artifacts(doc, paths, "job-1")
+
+    assert manifest["images"][0]["caption"] is None
+    assert manifest["tables"][0]["caption"] is None
+
+
+def test_bottom_left_coordinates_are_reported_as_such(paths):
+    """PDF provenance is BOTTOMLEFT; the origin travels with the box.
+
+    Without it a client cannot tell which way `t` and `b` run.
+    """
+    doc = DoclingDocument(name="bottom-left")
+    doc.add_page(page_no=1, size=Size(width=600, height=800))
+    doc.add_picture(
+        image=ImageRef.from_pil(Image.new("RGB", (3, 3), "red"), dpi=72),
+        prov=ProvenanceItem(
+            page_no=1,
+            bbox=BoundingBox(l=72, t=640.5, r=523.2, b=310.8,
+                             coord_origin=CoordOrigin.BOTTOMLEFT),
+            charspan=(0, 0),
+        ),
+    )
+
+    assert write_artifacts(doc, paths, "job-1")["images"][0]["bbox"] == {
+        "l": 72.0, "t": 640.5, "r": 523.2, "b": 310.8,
+        "coord_origin": "BOTTOMLEFT",
+    }

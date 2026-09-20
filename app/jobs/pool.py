@@ -230,8 +230,18 @@ class WorkerPool:
             logger.info("Job %s failed (%s): %s", job_id, exc.error_type, exc.message)
             self._safe_mark_failed(job_id, exc.error_type, exc.message)
         except Exception as exc:
+            # The exception text goes to the log, not to the job record:
+            # job.error_message is served over HTTP, and docling's failures
+            # routinely embed container-internal filesystem paths (a missing
+            # EasyOCR weight reports its full path under MODELS_DIR). The
+            # type alone is enough for a caller to tell failures apart.
             logger.exception("Job %s raised an unexpected error", job_id)
-            self._safe_mark_failed(job_id, "internal_error", f"{type(exc).__name__}: {exc}")
+            self._safe_mark_failed(
+                job_id,
+                "internal_error",
+                f"The conversion failed unexpectedly ({type(exc).__name__}). "
+                "See the server logs for details.",
+            )
         else:
             self._store.mark_succeeded(job_id, manifest)
             logger.info(

@@ -70,10 +70,18 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
         # directory was unreadable -- and the field is spec-documented, so
         # it keeps its name.
         models_loaded = provider.models_loaded
+        # Same request-time question, asked of the same provider: which OCR
+        # languages this process can actually serve depends on the weights
+        # baked into the image, which only the provider can see.
+        check_ocr_support = provider.unsupported_ocr_reason
     else:
-        # A substituted service has no converter provider and loads nothing.
+        # A substituted service has no converter provider: it loads nothing
+        # and vetoes nothing.
         def models_loaded() -> bool:
             return False
+
+        def check_ocr_support(options) -> str | None:
+            return None
 
     pool = WorkerPool(
         store=store,
@@ -151,6 +159,7 @@ def create_app(settings: Settings | None = None, service=None) -> FastAPI:
     app.state.store = store
     app.state.pool = pool
     app.state.models_loaded = models_loaded
+    app.state.check_ocr_support = check_ocr_support
 
     # Outermost of the app's own middleware, so an over-sized body is
     # refused before routing, before the multipart parser spools it to

@@ -14,14 +14,21 @@ MAX_IMAGE_SCALE = 4.0
 IMAGE_SCALE_STEP = 0.5
 
 __all__ = [
+    "BoundingBoxRef",
     "ConversionOptions",
     "ErrorEnvelope",
+    "ImageList",
+    "ImageRef",
     "JobCreated",
     "JobDetail",
     "JobLinks",
     "JobResult",
+    "TableList",
     "TableMode",
+    "TableRef",
+    "build_image_refs",
     "build_job_detail",
+    "build_table_refs",
     "parse_options",
 ]
 
@@ -122,21 +129,80 @@ class ArtifactRef(BaseModel):
     bytes: int
 
 
+class BoundingBoxRef(BaseModel):
+    """Where an item sits on its page.
+
+    `coord_origin` is carried because docling reports PDF provenance
+    bottom-left and other sources top-left; without it `t` and `b` are
+    ambiguous.
+
+    The l/t/r/b names are docling's own, deliberately: `self_ref` exists so
+    a client can look this item up in document.json, and it would have to
+    translate field names on arrival if this model renamed them.
+    """
+
+    l: float = Field(description="Left edge.")  # noqa: E741 - docling's name, see above
+    t: float = Field(description="Top edge, in the stated coordinate origin.")
+    r: float = Field(description="Right edge.")
+    b: float = Field(description="Bottom edge, in the stated coordinate origin.")
+    coord_origin: str = Field(description="'TOPLEFT' or 'BOTTOMLEFT'.")
+
+
 class TableRef(BaseModel):
     index: int
     rows: int
     cols: int
     page: int | None = None
+    caption: str | None = Field(
+        default=None, description="The table's caption, or null if it has none."
+    )
+    self_ref: str | None = Field(
+        default=None,
+        description="docling's node reference, e.g. '#/tables/0'. Indexes into document.json.",
+    )
+    bbox: BoundingBoxRef | None = Field(
+        default=None, description="Position on the page, or null without provenance."
+    )
     csv_url: str
     html_url: str
 
 
 class ImageRef(BaseModel):
+    index: int | None = Field(
+        default=None,
+        description=(
+            "docling's picture index. Pictures carrying no image are omitted "
+            "entirely, so this sequence can have gaps; it always agrees with self_ref."
+        ),
+    )
     name: str
     kind: str
     page: int | None = None
+    width: int | None = Field(default=None, description="Image width in pixels.")
+    height: int | None = Field(default=None, description="Image height in pixels.")
+    caption: str | None = Field(
+        default=None, description="The image's caption, or null if it has none."
+    )
+    self_ref: str | None = Field(
+        default=None,
+        description="docling's node reference, e.g. '#/pictures/0'. Indexes into document.json.",
+    )
+    bbox: BoundingBoxRef | None = Field(
+        default=None, description="Position on the page, or null without provenance."
+    )
     url: str
     bytes: int
+
+
+class ImageList(BaseModel):
+    """Every image in a document. An object, not a bare array, so fields can
+    be added later without breaking clients."""
+
+    images: list[ImageRef] = []
+
+
+class TableList(BaseModel):
+    tables: list[TableRef] = []
 
 
 class JobResult(BaseModel):
@@ -199,25 +265,56 @@ def _build_result(job: Job, base: str) -> JobResult:
         document=ArtifactRef(
             url=f"{base}/document.json", bytes=manifest.get("document", {}).get("bytes", 0)
         ),
-        tables=[
-            TableRef(
-                index=entry["index"],
-                rows=entry["rows"],
-                cols=entry["cols"],
-                page=entry.get("page"),
-                csv_url=f"{base}/tables/{entry['index']}?format=csv",
-                html_url=f"{base}/tables/{entry['index']}?format=html",
-            )
-            for entry in manifest.get("tables", [])
-        ],
-        images=[
-            ImageRef(
-                name=entry["name"],
-                kind=entry["kind"],
-                page=entry.get("page"),
-                url=f"{base}/images/{entry['name']}",
-                bytes=entry["bytes"],
-            )
-            for entry in manifest.get("images", [])
-        ],
+        tables=build_table_refs(job, base),
+        images=build_image_refs(job, base),
     )
+
+
+# The manifest -> response mapping for tables and images lives here and
+# nowhere else. `_build_result` and the two listing routes all call these,
+# so the arrays in `GET /v1/documents/{id}` and the ones from
+# `/images` and `/tables` cannot drift apart. CLAUDE.md calls the manifest a
+# cross-module contract; this is the single place the HTTP side reads it.
+
+
+def build_image_refs(job: Job, base: str) -> list[ImageRef]:
+    """Expand every image in the job's manifest into its API representation.
+
+    Manifest entries store filenames; the URL is built here. Metadata added
+    after a job was converted reads back as None rather than raising, so
+    manifests written by an earlier version still render.
+    """
+    return [
+        ImageRef(
+            index=entry.get("index"),
+            name=entry["name"],
+            kind=entry["kind"],
+            page=entry.get("page"),
+            width=entry.get("width"),
+            height=entry.get("height"),
+            caption=entry.get("caption"),
+            self_ref=entry.get("self_ref"),
+            bbox=entry.get("bbox"),
+            url=f"{base}/images/{entry['name']}",
+            bytes=entry["bytes"],
+        )
+        for entry in (job.manifest or {}).get("images", [])
+    ]
+
+
+def build_table_refs(job: Job, base: str) -> list[TableRef]:
+    """Expand every table in the job's manifest into its API representation."""
+    return [
+        TableRef(
+            index=entry["index"],
+            rows=entry["rows"],
+            cols=entry["cols"],
+            page=entry.get("page"),
+            caption=entry.get("caption"),
+            self_ref=entry.get("self_ref"),
+            bbox=entry.get("bbox"),
+            csv_url=f"{base}/tables/{entry['index']}?format=csv",
+            html_url=f"{base}/tables/{entry['index']}?format=html",
+        )
+        for entry in (job.manifest or {}).get("tables", [])
+    ]

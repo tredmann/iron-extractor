@@ -8,9 +8,27 @@ from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFil
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
 
-from app.api.deps import get_paths, get_pool, get_settings_from_request, get_store, require_api_key
+from app.api.deps import (
+    get_ocr_support_check,
+    get_paths,
+    get_pool,
+    get_settings_from_request,
+    get_store,
+    require_api_key,
+)
 from app.api.errors import ApiError
-from app.api.schemas import ErrorEnvelope, JobCreated, JobDetail, JobLinks, build_job_detail, parse_options
+from app.api.schemas import (
+    ErrorEnvelope,
+    ImageList,
+    JobCreated,
+    JobDetail,
+    JobLinks,
+    TableList,
+    build_image_refs,
+    build_job_detail,
+    build_table_refs,
+    parse_options,
+)
 from app.jobs.models import Job, JobStatus
 from app.jobs.pool import QueueFull
 
@@ -103,6 +121,14 @@ async def create_document(
     pool = get_pool(request)
 
     parsed = parse_options(options, settings)
+
+    # Before the upload is spooled to disk, let alone queued: a language
+    # whose EasyOCR recognizer was never baked into this image cannot be
+    # downloaded at conversion time, so accepting the job would only buy
+    # the caller a 202 followed by a failed job a second later.
+    unsupported = get_ocr_support_check(request)(parsed)
+    if unsupported is not None:
+        raise ApiError(400, "unsupported_ocr_language", unsupported)
 
     job_id = str(uuid4())
     paths.create(job_id)
@@ -219,6 +245,23 @@ async def get_document_json(request: Request, job_id: str) -> FileResponse:
 
 
 @router.get(
+    "/documents/{job_id}/tables",
+    response_model=TableList,
+    summary="List every table in a document",
+    responses={**_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
+)
+async def list_tables(request: Request, job_id: str) -> TableList:
+    """Enumerate the document's tables without pulling the whole job detail.
+
+    Reads the manifest only -- no artifact file is touched, so this answers
+    at the same cost whether the document has one table or two hundred. A
+    document that genuinely has none is an empty list, not a 404.
+    """
+    job = _require_succeeded(request, job_id)
+    return TableList(tables=build_table_refs(job, _job_base_url(job_id)))
+
+
+@router.get(
     "/documents/{job_id}/tables/{index}",
     response_class=FileResponse,
     summary="Fetch one extracted table as CSV or HTML",
@@ -251,6 +294,23 @@ async def get_table(
             headers={"X-Content-Type-Options": "nosniff"},
         )
     return _serve(path, "text/csv; charset=utf-8", label)
+
+
+@router.get(
+    "/documents/{job_id}/images",
+    response_model=ImageList,
+    summary="List every image in a document",
+    responses={**_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
+)
+async def list_images(request: Request, job_id: str) -> ImageList:
+    """Enumerate the document's images, with the metadata needed to pick one.
+
+    Each entry carries the pixel dimensions, caption, page, bounding box and
+    docling node ref alongside the URL, so a client can decide what to fetch
+    without downloading anything first.
+    """
+    job = _require_succeeded(request, job_id)
+    return ImageList(images=build_image_refs(job, _job_base_url(job_id)))
 
 
 @router.get(

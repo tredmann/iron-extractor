@@ -493,3 +493,32 @@ def test_pool_rejects_a_non_positive_size(harness):
         WorkerPool(store, RecordingService(), paths, threads=0, queue_max=4)
     with pytest.raises(ValueError):
         WorkerPool(store, RecordingService(), paths, threads=1, queue_max=0)
+
+
+def test_internal_error_message_does_not_leak_exception_detail(harness):
+    """Unexpected exceptions are logged in full but summarized to the caller.
+
+    docling's offline EasyOCR failure raises `FileNotFoundError: Missing
+    /opt/models/EasyOcr/latin_g2.pth and downloads disabled`. Echoing
+    `f"{type(exc).__name__}: {exc}"` into the job record published a
+    container-internal filesystem path over HTTP.
+    """
+    store, paths = harness
+    leak = "/opt/models/EasyOcr/latin_g2.pth"
+    service = RecordingService(
+        raises=FileNotFoundError(f"Missing {leak} and downloads disabled")
+    )
+    pool = WorkerPool(store, service, paths, threads=1, queue_max=4)
+    pool.start()
+    try:
+        _seed_job(store, paths, "job-1")
+        pool.enqueue("job-1")
+        assert pool.wait_idle(timeout=5)
+    finally:
+        pool.stop(grace_seconds=5)
+
+    job = store.get("job-1")
+    assert job.error_type == "internal_error"
+    assert leak not in job.error_message
+    assert "/opt/models" not in job.error_message
+    assert job.error_message

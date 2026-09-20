@@ -74,6 +74,9 @@ def _write_tables(document, paths: JobPaths, job_id: str) -> tuple[list[dict], l
                 "page": _page_of(table),
                 "csv": csv_target.name,
                 "html": html_target.name,
+                "caption": _caption_of(table, document),
+                "self_ref": _self_ref_of(table),
+                "bbox": _bbox_of(table),
             }
         except Exception as exc:
             # No manifest entry is appended, so the artifact routes will
@@ -106,10 +109,20 @@ def _write_pictures(document, paths: JobPaths, job_id: str) -> tuple[list[dict],
             image.save(target, format="PNG")
 
             entry = {
+                # docling's picture index, not the position in this list:
+                # pictures without an image are skipped above, and this is
+                # the number `self_ref` agrees with.
+                "index": index,
                 "name": name,
                 "kind": _label_of(picture),
                 "page": _page_of(picture),
                 "bytes": target.stat().st_size,
+                # Free: the image is already decoded in memory.
+                "width": image.width,
+                "height": image.height,
+                "caption": _caption_of(picture, document),
+                "self_ref": _self_ref_of(picture),
+                "bbox": _bbox_of(picture),
             }
         except Exception as exc:
             logger.exception("Job %s: picture %d could not be exported", job_id, index)
@@ -138,3 +151,49 @@ def _label_of(item) -> str:
     if label is None:
         return "picture"
     return str(getattr(label, "value", label))
+
+
+def _bbox_of(item) -> dict | None:
+    """The item's box on the page, or None when it has no provenance.
+
+    `coord_origin` travels with the box because docling uses BOTTOMLEFT for
+    PDF provenance and TOPLEFT elsewhere -- without it a client cannot tell
+    which direction `t` and `b` run. Coordinates are forced to float so the
+    manifest stays plain JSON.
+    """
+    provenance = getattr(item, "prov", None)
+    bbox = getattr(provenance[0], "bbox", None) if provenance else None
+    if bbox is None:
+        return None
+    origin = getattr(bbox, "coord_origin", None)
+    return {
+        "l": float(bbox.l),
+        "t": float(bbox.t),
+        "r": float(bbox.r),
+        "b": float(bbox.b),
+        "coord_origin": str(getattr(origin, "value", origin)),
+    }
+
+
+def _caption_of(item, document) -> str | None:
+    """The item's caption, or None when it has none.
+
+    docling returns an empty string for an uncaptioned item; that becomes
+    None so a client has one absent-value check rather than two. Captions
+    are resolved through the document because docling stores them as
+    references to text items, not inline.
+    """
+    caption = getattr(item, "caption_text", None)
+    if caption is None:
+        return None
+    text = caption(document)
+    return text or None
+
+
+def _self_ref_of(item) -> str | None:
+    """docling's own node reference, e.g. `#/pictures/0`.
+
+    The one field that lets a client find this exact item inside
+    document.json without re-deriving it from page and position.
+    """
+    return getattr(item, "self_ref", None)

@@ -31,10 +31,22 @@ RUN pip install -r requirements.txt
 # includes rapidocr (which imports cv2, which needs libxcb -- not present in
 # this slim builder stage, so it crashes here) and omits easyocr entirely --
 # yet EasyOcrOptions is the only OCR backend app/conversion/converters.py
-# ever configures (see build_pipeline_options). "en" matches
-# Settings.default_ocr_languages; requesting other OCR languages against
-# this offline image requires rebuilding with more --easyocr-lang flags.
-RUN docling-tools models download -o /opt/models layout tableformer easyocr --easyocr-lang en
+# ever configures (see build_pipeline_options).
+#
+# Both "en" and "de" are requested because EasyOCR picks its recognizer from
+# the whole language *set*, not per language: the list ["en"] exactly gets
+# the small english_g2.pth, and literally any other Latin-script set --
+# ["de"], ["en","de"], ["fr"] -- gets latin_g2.pth instead. Baking only
+# English therefore made every multi-language request fail deep inside a
+# worker with `FileNotFoundError: Missing /opt/models/EasyOcr/latin_g2.pth`,
+# because artifacts_path forces download_enabled=False. "de" is a stand-in
+# for the whole Latin script: latin_g2.pth is one ~15MB file covering de,
+# fr, es, it, nl, pt and the rest. Non-Latin scripts (Cyrillic, CJK, Arabic,
+# Devanagari) are separate files and still need their own --easyocr-lang
+# flags here; ConverterProvider.unsupported_ocr_reason rejects requests for
+# anything not baked in with a 400 rather than letting them reach a worker.
+RUN docling-tools models download -o /opt/models layout tableformer easyocr \
+    --easyocr-lang en --easyocr-lang de
 
 
 FROM python:3.12-slim AS runtime

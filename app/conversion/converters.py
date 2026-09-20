@@ -7,6 +7,11 @@ from app.api.schemas import ConversionOptions, TableMode
 
 logger = logging.getLogger(__name__)
 
+# docling stores EasyOCR weights under this subdirectory of artifacts_path
+# (EasyOcrModel._model_repo_folder). Mirrored rather than imported so this
+# module keeps its no-docling-at-import-time property.
+_EASYOCR_FOLDER = "EasyOcr"
+
 
 class ConverterProvider:
     """Supplies docling converters, cached per thread in a small LRU.
@@ -65,6 +70,109 @@ class ConverterProvider:
         if self._models_dir is not None:
             pipeline_options.artifacts_path = self._models_dir
         return pipeline_options
+
+    def unsupported_ocr_reason(self, options: ConversionOptions) -> str | None:
+        """Why this server cannot OCR this request, or None if it can.
+
+        Answered from the weights actually on disk. When `models_dir` is
+        set, docling forces EasyOCR's `download_enabled` to False (see
+        EasyOcrModel.__init__), so a recognizer that was not baked into the
+        image cannot be fetched at conversion time -- EasyOCR raises a bare
+        `FileNotFoundError` from inside a worker thread, roughly a second
+        after the caller already got their 202. Asking here turns that into
+        a 400 on the request that caused it.
+
+        Returns a message rather than raising, so the API layer owns the
+        status code and this layer stays free of HTTP concepts.
+        """
+        # `do_ocr=False` means EasyOcrModel never constructs a Reader and
+        # never reads a weight, so the language list is inert -- do not
+        # reject a request that would have worked.
+        if not options.ocr or self._models_dir is None:
+            return None
+
+        from easyocr.config import all_lang_list, detection_models, recognition_models
+
+        requested = list(options.ocr_languages)
+        unknown = sorted(set(requested) - set(all_lang_list))
+        if unknown:
+            return f"EasyOCR does not recognize the language code(s) {unknown}."
+
+        generation, key, compatible = self._resolve_recognizer(requested)
+        if compatible is not None:
+            extra = sorted(set(requested) - set(compatible))
+            if extra:
+                return (
+                    f"EasyOCR cannot combine {extra} with the script selected by "
+                    f"{sorted(set(requested) & set(compatible))}; that model is only "
+                    f"compatible with English."
+                )
+
+        folder = self._models_dir / _EASYOCR_FOLDER
+        needed = [
+            detection_models["craft"]["filename"],
+            recognition_models[generation][key]["filename"],
+        ]
+        missing = [name for name in needed if not (folder / name).is_file()]
+        if missing:
+            # Filenames only, never the resolved path: this string is
+            # returned to an HTTP caller.
+            return (
+                f"This server has no OCR weights for {requested}. It would need "
+                f"{missing}, which this image was not built with. Rebuild the image "
+                f"with a matching --easyocr-lang flag to enable them."
+            )
+        return None
+
+    def _resolve_recognizer(self, requested: list[str]) -> tuple[str, str, list[str] | None]:
+        """Pick the EasyOCR recognizer for a language set, as EasyOCR would.
+
+        A faithful port of the auto-detect ladder in `easyocr.Reader.__init__`,
+        in the same order -- including the exact list comparison `== ["en"]`,
+        which is why ["en"] gets the small English-only model while
+        ["de", "en"] falls all the way through to Latin. Only the dispatch is
+        ported; every language list and filename is read back out of
+        `easyocr.config`, so an EasyOCR upgrade cannot leave stale data here.
+
+        Returns (generation, model key, languages the model accepts). The
+        third element is None for the Latin model, which imposes no
+        compatibility restriction of its own.
+        """
+        from easyocr.config import (
+            arabic_lang_list,
+            bengali_lang_list,
+            cyrillic_lang_list,
+            devanagari_lang_list,
+        )
+
+        if requested == ["en"]:
+            return "gen2", "english_g2", ["en"]
+
+        # Single-language markers, tested in EasyOCR's order. Each of these
+        # models accepts only its own language plus English.
+        for marker, generation, key in (
+            ("th", "gen1", "thai_g1"),
+            ("ch_tra", "gen1", "zh_tra_g1"),
+            ("ch_sim", "gen2", "zh_sim_g2"),
+            ("ja", "gen2", "japanese_g2"),
+            ("ko", "gen2", "korean_g2"),
+            ("ta", "gen1", "tamil_g1"),
+            ("te", "gen2", "telugu_g2"),
+            ("kn", "gen2", "kannada_g2"),
+        ):
+            if marker in requested:
+                return generation, key, [marker, "en"]
+
+        for group, generation, key in (
+            (bengali_lang_list, "gen1", "bengali_g1"),
+            (arabic_lang_list, "gen1", "arabic_g1"),
+            (devanagari_lang_list, "gen1", "devanagari_g1"),
+            (cyrillic_lang_list, "gen2", "cyrillic_g2"),
+        ):
+            if set(requested) & set(group):
+                return generation, key, list(group) + ["en"]
+
+        return "gen2", "latin_g2", None
 
     def get(self, options: ConversionOptions):
         """Return a converter for these options, reusing one where possible."""

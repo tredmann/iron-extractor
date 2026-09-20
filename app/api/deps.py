@@ -74,3 +74,8 @@ def get_pool(request: Request):
 
 def get_paths(request: Request):
     return request.app.state.paths
+
+
+def get_ocr_support_check(request: Request):
+    """The callable that vetoes OCR language sets this server has no weights for."""
+    return request.app.state.check_ocr_support

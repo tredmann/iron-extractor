@@ -132,3 +132,116 @@ def test_a_failed_build_leaves_models_unloaded(provider, monkeypatch):
 def test_non_positive_cache_size_is_rejected():
     with pytest.raises(ValueError):
         ConverterProvider(models_dir=None, timeout_seconds=None, cache_size=0)
+
+
+# --- OCR language support ------------------------------------------------
+#
+# The image bakes a fixed set of EasyOCR recognizers. `unsupported_ocr_reason`
+# is what stops a request for anything else from being accepted and then dying
+# inside a worker thread with a bare FileNotFoundError.
+
+
+def _options(**kwargs) -> ConversionOptions:
+    base = dict(ocr=True, ocr_languages=["en"], table_mode=TableMode.FAST, image_scale=1.0)
+    return ConversionOptions(**{**base, **kwargs})
+
+
+def test_ocr_disabled_is_never_rejected(tmp_path):
+    """do_ocr=False means EasyOcrModel builds no Reader, so no weight is read.
+
+    Returns before importing easyocr at all, which is why this runs in the
+    fast suite.
+    """
+    provider = ConverterProvider(models_dir=tmp_path, timeout_seconds=1.0)
+    assert provider.unsupported_ocr_reason(_options(ocr=False, ocr_languages=["ja"])) is None
+
+
+def test_downloads_enabled_is_never_rejected(provider):
+    """With no models_dir, EasyOCR may fetch whatever the request asks for."""
+    assert provider.unsupported_ocr_reason(_options(ocr_languages=["ja"])) is None
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize(
+    "languages",
+    [["en"], ["en", "de"], ["de"], ["fr", "es"], ["ja"], ["ru", "en"], ["ar"], ["hi"], ["th"], ["ko"]],
+)
+def test_resolver_agrees_with_easyocr(languages):
+    """The ported dispatch ladder must pick the model EasyOCR itself picks.
+
+    Guards against drift: `_resolve_recognizer` reimplements the ordering in
+    `easyocr.Reader.__init__`, and an EasyOCR upgrade could reorder it.
+    A Reader built with detector and recognizer both off resolves the model
+    without touching a single weight file.
+    """
+    easyocr = pytest.importorskip("easyocr", reason="real easyocr not installed")
+    from easyocr.config import recognition_models
+
+    provider = ConverterProvider(models_dir=Path("/nonexistent"), timeout_seconds=1.0)
+    generation, key, _ = provider._resolve_recognizer(languages)
+
+    reader = easyocr.Reader(languages, gpu=False, detector=False, recognizer=False, verbose=False)
+    assert reader.character == recognition_models[generation][key]["characters"]
+
+
+@pytest.mark.slow
+def test_unknown_language_code_is_reported():
+    pytest.importorskip("easyocr", reason="real easyocr not installed")
+    provider = ConverterProvider(models_dir=Path("/nonexistent"), timeout_seconds=1.0)
+    reason = provider.unsupported_ocr_reason(_options(ocr_languages=["en", "klingon"]))
+    assert reason is not None
+    assert "klingon" in reason
+
+
+@pytest.mark.slow
+def test_incompatible_script_mix_is_reported():
+    """EasyOCR's non-Latin models pair only with English; ja+de is impossible."""
+    pytest.importorskip("easyocr", reason="real easyocr not installed")
+    provider = ConverterProvider(models_dir=Path("/nonexistent"), timeout_seconds=1.0)
+    reason = provider.unsupported_ocr_reason(_options(ocr_languages=["ja", "de"]))
+    assert reason is not None
+    assert "de" in reason
+
+
+@pytest.mark.slow
+def test_missing_weights_are_reported_without_leaking_the_path(tmp_path):
+    pytest.importorskip("easyocr", reason="real easyocr not installed")
+    (tmp_path / "EasyOcr").mkdir()
+    provider = ConverterProvider(models_dir=tmp_path, timeout_seconds=1.0)
+
+    reason = provider.unsupported_ocr_reason(_options(ocr_languages=["en", "de"]))
+    assert reason is not None
+    assert "latin_g2.pth" in reason
+    # The message is served to HTTP callers -- filenames, never the path.
+    assert str(tmp_path) not in reason
+
+
+@pytest.mark.slow
+@pytest.mark.parametrize("languages", [["en"], ["en", "de"], ["de"], ["fr"], ["nl", "en"]])
+def test_image_serves_every_latin_language(languages):
+    """The languages the Dockerfile bakes in must all pass the check.
+
+    ["en"] needs english_g2.pth; every other Latin-script set needs
+    latin_g2.pth. Both are downloaded by the `--easyocr-lang en
+    --easyocr-lang de` pair in the builder stage.
+    """
+    pytest.importorskip("easyocr", reason="real easyocr not installed")
+    models_dir = Path("/opt/models")
+    if not models_dir.is_dir():
+        pytest.skip("not running inside the built image")
+
+    provider = ConverterProvider(models_dir=models_dir, timeout_seconds=1.0)
+    assert provider.unsupported_ocr_reason(_options(ocr_languages=languages)) is None
+
+
+@pytest.mark.slow
+def test_image_rejects_a_script_it_was_not_built_with():
+    pytest.importorskip("easyocr", reason="real easyocr not installed")
+    models_dir = Path("/opt/models")
+    if not models_dir.is_dir():
+        pytest.skip("not running inside the built image")
+
+    provider = ConverterProvider(models_dir=models_dir, timeout_seconds=1.0)
+    reason = provider.unsupported_ocr_reason(_options(ocr_languages=["ja"]))
+    assert reason is not None
+    assert "japanese_g2.pth" in reason
