@@ -5,6 +5,27 @@ any agent integrating this service from another codebase. Read **Architecture**
 and **Invariants** before changing code; read **The HTTP contract** and
 **Integrating this service** before calling it from elsewhere.
 
+## How to work here
+
+**YAGNI.** Build what was asked and nothing beside it. No speculative
+parameters, no abstraction for a second caller that does not exist, no "while
+I'm here" extras. When you believe something extra genuinely belongs in the
+change, say what and why, then **wait for an explicit yes** before building it.
+Scaling the work up is the user's call, not yours. (Scaling it *down* is the
+same rule in reverse: if part of the ask looks wrong, finish it anyway under a
+stated assumption and flag the concern.)
+
+**Reach for what already exists, in this order:** the Python standard library,
+then a dependency this project already has, then a new dependency, then your
+own implementation. Hand-rolling something the stdlib does is the failure this
+rule exists to prevent — but so is adding a package to avoid ten lines.
+
+A new dependency is itself a YAGNI decision and needs the same explicit yes.
+Every requirement here is exact-pinned (`==`), the runtime image is already
+~5GB because of torch, and the container runs fully offline — so a dependency
+is a permanent, weighed choice, not a convenience. Say what you need, what in
+`requirements-base.txt` you checked first, and why it did not fit.
+
 ## Commands
 
 ```bash
