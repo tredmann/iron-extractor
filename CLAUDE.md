@@ -151,6 +151,26 @@ how often it bites is not.
 **`GET /pages` is unbounded.** Response size grows with the document and no
 parameter reduces it. `/pages/{page_no}` is the bounded alternative.
 
+**Per-page artifacts cost quadratic time, on every job.** docling's `page_no`
+is a *filter*, not a partition: each `export_to_markdown(page_no=N)` walks the
+whole document to compute excluded refs, and `_write_pages` does that twice
+per page. Measured on synthetic documents of 12 items per page:
+
+| pages | whole-document markdown | per-page export |
+|---|---|---|
+| 10 | 13 ms | 70 ms |
+| 50 | 24 ms | 1.6 s |
+| 100 | 49 ms | 6.2 s |
+| 200 | 98 ms | 25 s |
+
+Doubling the pages quadruples the time. This runs whether or not anyone ever
+calls `/pages`, it is not covered by `JOB_TIMEOUT_SECONDS` (that bounds
+docling's convert, not artifact writing), and a worker thread is held
+throughout. With OCR on it is a 2–6% tax at 100 pages; with `"ocr": false` on
+a digital PDF, conversion is fast and this *dominates* — a 200-page document
+can spend longer here than converting. Known and deliberate for now; making it
+opt-in via `options` is the obvious fix if it starts to hurt.
+
 **`null` and `""` differ.** On a page, `markdown`/`text` are `null` only when
 the file could not be read; `""` is a page docling registered but extracted
 nothing from. A caption is `null`, never `""`, when an item has none.
@@ -271,8 +291,27 @@ which it serves off the loop. `/pages` inlines content, so it reads the files
 directly — and on a long document that is many reads. They go through
 `run_in_threadpool` for that reason; doing them inline would stall every other
 request in this single-process server. `_read_page_text` returns `None` for an
-unreadable file rather than raising, so one missing file cannot sink a whole
-`/pages` response.
+unreadable file rather than raising, so one bad file cannot sink a whole
+`/pages` response — and it catches `ValueError` as well as `OSError`, because
+the likeliest corruption is a page truncated mid-multibyte, which raises
+`UnicodeDecodeError`. That is a `ValueError`; catching only `OSError` turned
+exactly the failure `_write_pages` is built to survive into a 500.
+
+**Optional metadata never decides whether an artifact is reachable.**
+`_metadata_of` (caption, `self_ref`, `bbox`) runs *outside* each writer's
+export `try` and degrades each field to `None` on its own. Inside it, a
+`caption_text` call resolving a dangling reference raised *after* the
+CSV/HTML/PNG had been written, so the manifest entry was never appended: the
+files sat on disk while their route answered 404 and the item vanished from
+the listings and from its page. A cosmetic failure costs a null, never the
+content.
+
+**`_write_pages` makes its own directory.** `JobPaths.create` makes `pages/`
+at upload time, but `store.recover_interrupted()` re-runs jobs that were
+queued when the service restarted — against directories a *previous* version
+created, which have none. Without the `mkdir` every page of every such job
+fails and a 300-page document returns 300 warnings. Any new artifact
+subdirectory needs the same treatment for the same upgrade window.
 
 **Exactly one uvicorn worker.** The queue and thread pool live in the process;
 a second uvicorn worker means a second queue contending over one SQLite file.
