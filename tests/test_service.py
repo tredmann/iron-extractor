@@ -178,5 +178,7 @@ def test_a_broken_table_still_yields_a_successful_conversion(paths, monkeypatch)
     manifest = service.run("job-1", Path("/tmp/in.pdf"), ConversionOptions())
 
     assert manifest["tables"] == []
-    assert "export exploded" in manifest["warnings"][0]
+    # The exception message is never served over HTTP -- only its type.
+    assert "RuntimeError" in manifest["warnings"][0]
+    assert "export exploded" not in manifest["warnings"][0]
     assert paths.markdown_file("job-1").exists()

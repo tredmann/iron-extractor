@@ -129,7 +129,15 @@ async def create_document(
     # whose EasyOCR recognizer was never baked into this image cannot be
     # downloaded at conversion time, so accepting the job would only buy
     # the caller a 202 followed by a failed job a second later.
-    unsupported = get_ocr_support_check(request)(parsed)
+    #
+    # Offloaded like _write_upload below: on the production path (MODELS_DIR
+    # set, ocr true by default) the first call ever made to this checker
+    # imports easyocr, which pulls in torch, torchvision and cv2 as a side
+    # effect of its own __init__.py. Run inline, that import happens on the
+    # event loop -- this server has one worker process and one event loop --
+    # so the first POST after a cold start would freeze every concurrent
+    # poll, upload and /health check for as long as the import takes.
+    unsupported = await run_in_threadpool(get_ocr_support_check(request), parsed)
     if unsupported is not None:
         raise ApiError(400, "unsupported_ocr_language", unsupported)
 

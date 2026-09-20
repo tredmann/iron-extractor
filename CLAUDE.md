@@ -129,6 +129,16 @@ produces `page_count`/`warnings`/`markdown.bytes`/`document.bytes`/
 those. It stores **filenames**; the HTTP layer builds URLs. Changing a key
 breaks three modules.
 
+Two of those filename fields are written but never read back:
+`tables[].csv`/`tables[].html` and `pages[].markdown`/`pages[].text`.
+`build_table_refs` builds `csv_url`/`html_url` from `entry["index"]` alone,
+and `_read_page_contents` builds each page's file path from
+`paths.page_file(job_id, page_no, ...)` alone — neither looks at the
+filename the manifest recorded. They exist for readability and as a
+paper trail of what `write_artifacts` produced, not because anything
+depends on them. A change to `JobPaths`'s naming scheme would desynchronise
+them from the files actually on disk with nothing to catch it.
+
 `schemas.build_image_refs` / `build_table_refs` are the *only* place the HTTP
 side reads those arrays, and `build_page_details` is the only place it reads
 `pages[]`. `_build_result` and the `/images` and `/tables` listing routes all

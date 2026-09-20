@@ -7,6 +7,7 @@ and blow up ~a second later inside a worker thread, surfacing docling's raw
 """
 
 import json
+import threading
 
 
 from app.storage.paths import JobPaths
@@ -65,3 +66,49 @@ def test_servable_language_still_gets_202(client, auth):
 def test_substituted_service_accepts_every_language_by_default(client, auth):
     """A fake service has no converter provider, so it vetoes nothing."""
     assert _upload(client, auth, options={"ocr_languages": ["ja"]}).status_code == 202
+
+
+def test_ocr_support_check_does_not_run_on_the_event_loop_thread(client, auth):
+    """`create_document` must offload the OCR-support check.
+
+    On the production path, the first call ever made to the real checker
+    (`ConverterProvider.unsupported_ocr_reason`) imports `easyocr.config`,
+    which runs easyocr's `__init__.py` and pulls in torch, torchvision and
+    cv2 as a side effect. Called inline from the `async def` view, that
+    import runs on the single event loop this one-worker-process server has,
+    freezing every concurrent poll, upload and /health check for as long as
+    the import takes. It must run in `run_in_threadpool` instead.
+
+    The event loop's thread is captured via `/health`: its handler is also
+    `async def`, and calls the `models_loaded` state callable directly, with
+    no `run_in_threadpool` in between -- so whatever thread runs that call is
+    the thread running the event loop. TestClient's portal is a single
+    dedicated thread for the lifetime of the `with TestClient(app)` block
+    (see tests/conftest.py), so a `/health` call and the upload below,
+    issued through the same `client`, run on the same thread whenever a
+    handler doesn't hop off it -- which is exactly the fact this test
+    trades on: against the unfixed code, `checker_thread` below equals
+    `loop_thread`, so this assertion genuinely fails there.
+    """
+    loop_thread: dict[str, threading.Thread] = {}
+
+    def record_loop_thread() -> bool:
+        loop_thread["thread"] = threading.current_thread()
+        return False
+
+    client.app.state.models_loaded = record_loop_thread
+    assert client.get("/health").status_code == 200
+    assert "thread" in loop_thread
+
+    checker_thread: dict[str, threading.Thread] = {}
+
+    def record_checker_thread(options):
+        checker_thread["thread"] = threading.current_thread()
+        return None
+
+    client.app.state.check_ocr_support = record_checker_thread
+    response = _upload(client, auth, options={"ocr_languages": ["en"]})
+
+    assert response.status_code == 202
+    assert "thread" in checker_thread
+    assert checker_thread["thread"] != loop_thread["thread"]

@@ -102,10 +102,26 @@ class ConverterProvider:
         if compatible is not None:
             extra = sorted(set(requested) - set(compatible))
             if extra:
+                # Derived from `compatible`, not hard-coded: for a single-
+                # language marker (Thai, Japanese, ...) that model really is
+                # English-only, but for the four script groups (Cyrillic,
+                # Arabic, Devanagari, Bengali) `compatible` is the whole
+                # group plus English -- dozens of Cyrillic languages accept
+                # each other, so saying "English only" there steers the
+                # caller away from combinations that would actually work.
+                # A large group is summarised by size rather than spelled
+                # out in full, which would be unreadable.
+                others = sorted(lang for lang in compatible if lang != "en")
+                if len(others) <= 4:
+                    accepted = f"{others} plus English"
+                else:
+                    accepted = (
+                        f"the {len(others)} languages that share this script, plus English"
+                    )
                 return (
                     f"EasyOCR cannot combine {extra} with the script selected by "
                     f"{sorted(set(requested) & set(compatible))}; that model is only "
-                    f"compatible with English."
+                    f"compatible with {accepted}."
                 )
 
         folder = self._models_dir / _EASYOCR_FOLDER

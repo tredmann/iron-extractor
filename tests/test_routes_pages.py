@@ -191,6 +191,8 @@ def test_is_409_for_a_failed_job(client, auth, recording_service, path):
     for _ in range(200):
         if client.get(f"/v1/documents/{job_id}", headers=auth).json()["status"] == "failed":
             break
+    else:
+        raise AssertionError("job never reached failed")
 
     assert client.get(f"/v1/documents/{job_id}/{path}", headers=auth).status_code == 409
 

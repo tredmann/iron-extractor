@@ -164,7 +164,14 @@ def test_downloads_enabled_is_never_rejected(provider):
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "languages",
-    [["en"], ["en", "de"], ["de"], ["fr", "es"], ["ja"], ["ru", "en"], ["ar"], ["hi"], ["th"], ["ko"]],
+    [
+        ["en"], ["en", "de"], ["de"], ["fr", "es"], ["ja"], ["ru", "en"], ["ar"], ["hi"],
+        ["th"], ["ko"],
+        # Previously untested branches of the dispatch ladder: the
+        # remaining single-language markers (ch_sim, ch_tra, ta, te, kn)
+        # and the Bengali group, alongside the ones above.
+        ["ch_sim"], ["ch_tra"], ["ta"], ["te"], ["kn"], ["bn"],
+    ],
 )
 def test_resolver_agrees_with_easyocr(languages):
     """The ported dispatch ladder must pick the model EasyOCR itself picks.
@@ -201,6 +208,22 @@ def test_incompatible_script_mix_is_reported():
     reason = provider.unsupported_ocr_reason(_options(ocr_languages=["ja", "de"]))
     assert reason is not None
     assert "de" in reason
+
+
+@pytest.mark.slow
+def test_group_script_mix_is_not_reported_as_english_only():
+    """Unlike the single-language markers, the four script groups (Cyrillic,
+    Arabic, Devanagari, Bengali) accept the whole group plus English -- not
+    just English. ru+de resolves to the Cyrillic recognizer, which also
+    accepts uk, bg, sr, mn... The message must not claim "English only" and
+    steer the caller away from combinations that would actually work.
+    """
+    pytest.importorskip("easyocr", reason="real easyocr not installed")
+    provider = ConverterProvider(models_dir=Path("/nonexistent"), timeout_seconds=1.0)
+    reason = provider.unsupported_ocr_reason(_options(ocr_languages=["ru", "de"]))
+    assert reason is not None
+    assert "de" in reason
+    assert "only compatible with English." not in reason
 
 
 @pytest.mark.slow

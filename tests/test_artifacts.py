@@ -177,6 +177,35 @@ def test_image_less_picture_is_skipped_without_disturbing_later_index(paths):
     assert paths.image_file("job-1", "picture-001.png").exists()
 
 
+def test_a_filesystem_path_in_the_exception_never_reaches_the_manifest(
+    document, paths, monkeypatch
+):
+    """A disk-full write during export must not leak the container's data
+    directory layout to an HTTP caller.
+
+    `manifest["warnings"]` is served verbatim as `JobResult.warnings` (see
+    app/api/schemas.py); the same disclosure class was already fixed for
+    job.error_message in app/jobs/pool.py (commit e1ccb8d) after an OSError's
+    str() -- which embeds the full path being written to -- reached a
+    caller. This reproduces that scenario for the table-export path.
+    """
+    from docling_core.types.doc import TableItem
+
+    leaky_path = str(paths.table_file("job-1", 0, "csv"))
+
+    def boom(self, doc=None, **kwargs):
+        raise OSError(f"[Errno 28] No space left on device: {leaky_path!r}")
+
+    monkeypatch.setattr(TableItem, "export_to_dataframe", boom)
+
+    manifest = write_artifacts(document, paths, "job-1")
+
+    assert len(manifest["warnings"]) == 1
+    assert "OSError" in manifest["warnings"][0]
+    assert leaky_path not in manifest["warnings"][0]
+    assert str(paths.jobs_root) not in manifest["warnings"][0]
+
+
 def test_a_failing_table_export_does_not_discard_the_conversion(document, paths, monkeypatch):
     """One unexportable table must not throw away a whole successful
     conversion. Before this, the exception escaped write_artifacts and the
@@ -196,7 +225,9 @@ def test_a_failing_table_export_does_not_discard_the_conversion(document, paths,
     assert json.loads(paths.document_file("job-1").read_text(encoding="utf-8"))["name"] == "fixture"
     assert len(manifest["warnings"]) == 1
     assert "Table 0" in manifest["warnings"][0]
-    assert "dataframe export blew up" in manifest["warnings"][0]
+    assert "RuntimeError" in manifest["warnings"][0]
+    # The exception message itself is never served over HTTP -- only its type.
+    assert "dataframe export blew up" not in manifest["warnings"][0]
     # The rest of the document survives intact.
     assert len(manifest["images"]) == 1
 
@@ -212,7 +243,8 @@ def test_a_failing_html_table_export_is_also_survivable(document, paths, monkeyp
     manifest = write_artifacts(document, paths, "job-1")
 
     assert manifest["tables"] == []
-    assert "html export blew up" in manifest["warnings"][0]
+    assert "ValueError" in manifest["warnings"][0]
+    assert "html export blew up" not in manifest["warnings"][0]
     assert paths.markdown_file("job-1").exists()
 
 
@@ -232,7 +264,8 @@ def test_a_failing_picture_export_does_not_discard_the_conversion(document, path
     assert paths.document_file("job-1").exists()
     assert len(manifest["warnings"]) == 1
     assert "Picture 0" in manifest["warnings"][0]
-    assert "cannot write PNG" in manifest["warnings"][0]
+    assert "OSError" in manifest["warnings"][0]
+    assert "cannot write PNG" not in manifest["warnings"][0]
 
 
 def test_per_item_warnings_join_the_ones_passed_in(document, paths, monkeypatch):
@@ -446,6 +479,7 @@ def test_a_failing_page_export_does_not_discard_the_conversion(document, paths, 
     assert manifest["pages"] == []
     assert len(manifest["warnings"]) == 2
     assert "Page 1" in manifest["warnings"][0]
-    assert "page export blew up" in manifest["warnings"][0]
+    assert "RuntimeError" in manifest["warnings"][0]
+    assert "page export blew up" not in manifest["warnings"][0]
     assert len(manifest["images"]) == 1
     assert paths.document_file("job-1").exists()

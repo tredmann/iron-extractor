@@ -84,10 +84,16 @@ def _write_tables(document, paths: JobPaths, job_id: str) -> tuple[list[dict], l
             # No manifest entry is appended, so the artifact routes will
             # answer 404 for this index; any half-written file left behind
             # is unreachable and goes away with the job.
+            #
+            # The warning goes to an HTTP caller (JobResult.warnings), so it
+            # carries only the exception type, not str(exc): docling and the
+            # stdlib routinely embed a container-internal filesystem path in
+            # their messages (a full disk reports the path being written
+            # to). The full exception -- message included -- goes to the log
+            # only, mirroring the fix already applied to job.error_message.
             logger.exception("Job %s: table %d could not be exported", job_id, index)
             warnings.append(
-                f"Table {index} could not be exported and was skipped: "
-                f"{type(exc).__name__}: {exc}"
+                f"Table {index} could not be exported and was skipped ({type(exc).__name__})."
             )
             continue
         entries.append(entry)
@@ -127,10 +133,12 @@ def _write_pictures(document, paths: JobPaths, job_id: str) -> tuple[list[dict],
                 "bbox": _bbox_of(picture),
             }
         except Exception as exc:
+            # Type only, not the message -- see the matching comment in
+            # _write_tables. A full-disk write here reports the target PNG's
+            # path under jobs_root the same way.
             logger.exception("Job %s: picture %d could not be exported", job_id, index)
             warnings.append(
-                f"Picture {index} could not be exported and was skipped: "
-                f"{type(exc).__name__}: {exc}"
+                f"Picture {index} could not be exported and was skipped ({type(exc).__name__})."
             )
             continue
         entries.append(entry)
@@ -171,10 +179,11 @@ def _write_pages(document, paths: JobPaths, job_id: str) -> tuple[list[dict], li
                 "text": text_target.name,
             }
         except Exception as exc:
+            # Type only, not the message -- see the matching comment in
+            # _write_tables.
             logger.exception("Job %s: page %s could not be exported", job_id, page_no)
             warnings.append(
-                f"Page {page_no} could not be exported and was skipped: "
-                f"{type(exc).__name__}: {exc}"
+                f"Page {page_no} could not be exported and was skipped ({type(exc).__name__})."
             )
             continue
         entries.append(entry)
