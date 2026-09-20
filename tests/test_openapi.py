@@ -105,3 +105,12 @@ def test_listing_routes_declare_their_error_responses(client):
         responses = paths[route]["get"]["responses"]
         for code in ("200", "401", "404", "409"):
             assert code in responses, f"{route} is missing {code}"
+
+
+def test_page_routes_declare_their_error_responses(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    for code in ("200", "401", "404", "409"):
+        assert code in paths["/v1/documents/{job_id}/pages"]["get"]["responses"]
+    detail = paths["/v1/documents/{job_id}/pages/{page_no}"]["get"]["responses"]
+    for code in ("200", "400", "401", "404", "409"):
+        assert code in detail

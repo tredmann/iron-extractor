@@ -23,9 +23,12 @@ from app.api.schemas import (
     JobCreated,
     JobDetail,
     JobLinks,
+    PageDetail,
+    PageList,
     TableList,
     build_image_refs,
     build_job_detail,
+    build_page_details,
     build_table_refs,
     parse_options,
 )
@@ -218,6 +221,40 @@ def _serve(
     )
 
 
+def _read_page_text(path: Path) -> str | None:
+    """A page artifact's contents, or None when it cannot be read.
+
+    None means "the manifest lists this page but its file is gone", which
+    stays distinguishable from "" -- a page docling registered but
+    extracted nothing from. Returning None rather than raising is what
+    stops one unreadable file from sinking a whole /pages response.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _read_page_contents(paths, job: Job, job_id: str, only: int | None = None) -> dict:
+    """Read every requested page's markdown and text.
+
+    Synchronous and called via run_in_threadpool: this is the one place the
+    API reads artifact bytes itself instead of handing Starlette a
+    FileResponse, and on a long document it is many reads. Doing them on the
+    event loop would stall every other request in this single-process server.
+    """
+    contents = {}
+    for entry in (job.manifest or {}).get("pages", []):
+        page_no = entry["page"]
+        if only is not None and page_no != only:
+            continue
+        contents[page_no] = (
+            _read_page_text(paths.page_file(job_id, page_no, "md")),
+            _read_page_text(paths.page_file(job_id, page_no, "txt")),
+        )
+    return contents
+
+
 @router.get(
     "/documents/{job_id}/markdown",
     response_class=FileResponse,
@@ -334,6 +371,52 @@ async def get_image(request: Request, job_id: str, name: str) -> FileResponse:
     except ValueError as exc:
         raise ApiError(400, "invalid_request", f"Illegal image name {name!r}.") from exc
     return _serve(path, "image/png", name)
+
+
+@router.get(
+    "/documents/{job_id}/pages",
+    response_model=PageList,
+    summary="Fetch every page of a document, content inline",
+    responses={**_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
+)
+async def list_pages(request: Request, job_id: str) -> PageList:
+    """Return every page with its Markdown and flat text inline.
+
+    Response size grows with the document and is deliberately unbounded --
+    one request gets the whole document page by page. Use
+    `/pages/{page_no}` where a bounded response matters.
+    """
+    job = _require_succeeded(request, job_id)
+    contents = await run_in_threadpool(
+        _read_page_contents, get_paths(request), job, job_id
+    )
+    return PageList(pages=build_page_details(job, _job_base_url(job_id), contents))
+
+
+@router.get(
+    "/documents/{job_id}/pages/{page_no}",
+    response_model=PageDetail,
+    summary="Fetch one page, content inline",
+    responses={**_INVALID, **_UNAUTHORIZED, **_NOT_FOUND, **_CONFLICT},
+)
+async def get_page(request: Request, job_id: str, page_no: int) -> PageDetail:
+    """Return one page's Markdown, flat text, images and tables.
+
+    The page is resolved from the manifest first: docling's exporter returns
+    an empty string for an out-of-range page rather than raising, so without
+    this check page 99 of a two-page document would look blank instead of
+    missing.
+    """
+    job = _require_succeeded(request, job_id)
+    pages = (job.manifest or {}).get("pages", [])
+    if not any(entry["page"] == page_no for entry in pages):
+        raise ApiError(404, "not_found", f"Job {job_id} has no page {page_no}.")
+
+    contents = await run_in_threadpool(
+        _read_page_contents, get_paths(request), job, job_id, page_no
+    )
+    details = build_page_details(job, _job_base_url(job_id), contents, only=page_no)
+    return details[0]
 
 
 @router.delete(
